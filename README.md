@@ -46,7 +46,7 @@ auto_study_mn/
 
 ### 1. 의존성 설치
 ```bash
-pip install fastapi uvicorn gspread oauth2client python-dotenv google-api-python-client google-auth-httplib2 google-auth-oauthlib google-cloud-vision
+pip install fastapi uvicorn gspread oauth2client python-dotenv google-api-python-client google-auth-httplib2 google-auth-oauthlib google-cloud-vision httpx
 ```
 
 ### 2. 구글 시트 및 드라이브 셋업
@@ -54,11 +54,12 @@ pip install fastapi uvicorn gspread oauth2client python-dotenv google-api-python
 2. `credentials.json` GCP 서비스 계정 키를 프로젝트 루트에 위치시킵니다.
 3. 최초 실행 시 (`python test_step1.py`) 구글 시트를 자동 스캔하여, 탭(Member_Master, Daily_Log)이 없다면 자동으로 초기 세팅을 진행합니다.
 
-### 3. 실시간 서버 가동
+### 3. 실시간 서버 가동 및 카카오톡 실제 연동
 ```bash
 uvicorn main:app --reload --port 8000
 ```
 - 서버 구동 뒤 `http://localhost:8000/dashboard` 로 접속하면 누적 벌금, N빵 정산 정보가 포함된 대시보드를 열람할 수 있습니다.
+- **실제 카카오톡 봇 연동 방법**: 위 서버를 켜둔 상태로 새 터미널에서 `ngrok http 8000`을 입력하여 외부 주소를 발급받은 뒤, 카카오 i 오픈빌더 스킬 서버 URL에 등록하면 핸드폰으로 실제 업로드 테스트가 시작됩니다! (상세 과정은 `TESTING.md` 참조)
 
 ---
 
