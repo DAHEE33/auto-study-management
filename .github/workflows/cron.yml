@@ -1,0 +1,36 @@
+name: Auto-Study Settlement Batch
+
+on:
+  schedule:
+    # 1. 매일 12:05 정오 (한국시간 KST 기준 12:05 = UTC 03:05)
+    # 서버 시간 지연 등을 고려해 12:05으로 설정
+    - cron: '5 3 * * *'
+    
+    # 2. 매주 수요일 스토리지 정리 (한국시간 수요일 KST 기준 12:05 = UTC 수요일 03:05)
+    # - cron: '5 3 * * 3' 
+
+jobs:
+  daily-absence-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Run Daily Absence Check Job
+        env:
+          GOOGLE_SHEET_URL: ${{ secrets.GOOGLE_SHEET_URL }}
+          GOOGLE_DRIVE_FOLDER_ID: ${{ secrets.GOOGLE_DRIVE_FOLDER_ID }}
+          # credentials.json 값을 GitHub Secrets에 통째로 넣어 사용합니다.
+          CREDENTIALS_JSON: ${{ secrets.CREDENTIALS_JSON }}
+        run: |
+          echo "$CREDENTIALS_JSON" > credentials.json
+          python jobs/daily_absence.py
