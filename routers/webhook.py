@@ -50,24 +50,44 @@ async def kakao_webhook(request: Request):
     action = body.get("action", {})
     params = action.get("detailParams", {})
     
+    # 디버깅을 위해 콘솔에 페이로드 출력
+    import json
+    print("=== [KAKAO WEBHOOK RECEIVED] ===")
+    print(json.dumps(body, indent=2, ensure_ascii=False))
+    
     # 임시로 유저 아이디를 닉네임으로 사용 (실제로는 매핑 필요)
     # 구글 시트에 사전 등록된 dev_user 로 하드코딩 (E2E 테스트 목적)
     nickname = "dev_user"
     now = datetime.now()
     
-    if "[🔥 오늘 인증]" in utterance:
-        # 카카오톡에서 이미지가 첨부되었을 때 'secureimage' 파라미터로 들어옴 (오픈빌더 설정 필요)
-        # 또는 utterance 가 http 시작하는 URL일 수 있음
-        image_url = ""
-        if "secureimage" in params:
-            image_url = params["secureimage"].get("origin", "")
-        elif utterance.startswith("http"):
-            image_url = utterance
+    # 이미지 URL 추출 (새로운 로직)
+    image_url = ""
+    # 1. detailParams에서 확인 (sys.secureimage 등 설정된 모든 파라미터를 순회)
+    for key, value in params.items():
+        if isinstance(value, dict) and value.get("origin"):
+            origin_val = value["origin"]
+            if "http" in origin_val:
+                # 카카오 secureimage는 종종 'List(http://...)' 형태로 들어옵니다.
+                if origin_val.startswith("List(") and origin_val.endswith(")"):
+                    origin_val = origin_val[5:-1]
+                image_url = origin_val
+                break
+    
+    # 2. utterance가 http URL 자체인 경우
+    if not image_url and utterance.startswith("http"):
+        image_url = utterance
 
+    # 사용자가 인증 버튼을 눌렀거나, 사진(이미지) 자체를 보냈거나, 블록 이름에 인증이 포함된 경우
+    block_name = user_request.get("block", {}).get("name", "")
+    is_auth_intent = "[🔥 오늘 인증]" in utterance or image_url or "인증" in block_name
+
+    if is_auth_intent:
         if not image_url:
-            return build_kakao_response("인증 사진을 함께 업로드해 주셔야 판독이 가능합니다! (설정: 봇 블록에서 sys.image 파라미터 활성화 필요)")
+            return build_kakao_response("인증 사진을 함께 업로드해 주셔야 판독이 가능합니다! 카카오톡 카메라/앨범에서 사진을 전송해주세요.")
 
-        reply_text = f"이미지를 수신했습니다. 잠시만 기다려주세요...\n({image_url[:30]}...)"
+        reply_text = f"이미지를 수신했습니다. 잠시만 기다려주세요...\n(분석 중...)"
+
+
         
         try:
             # 1. 이미지 다운로드 및 구글 드라이브 백업
