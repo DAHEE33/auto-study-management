@@ -7,9 +7,10 @@ class SettlementEngine:
 
     def __init__(self):
         # 벌금 기준표
-        self.FEE_MILD = 500   # 목표 미달이나 1h 이상
-        self.FEE_SEVERE = 1000 # 1h 미만 수행 또는 부정/오류
-        self.FEE_ABSENT = 2000 # 결석 (휴가 부족 시)
+        self.FEE_MILD = 500   # 목표 미달(단, 1h 이상 수행 시)
+        self.FEE_SEVERE = 1000 # 1h 미만 수행 (또는 날짜 오류)
+        self.FEE_ABSENT = 2000 # 결석
+        self.FEE_FRAUD_FAKE = 5000 # 고의적 거짓 인증
 
     def validate_dual_time(self, server_submit_time: datetime, ocr_end_time_str: str, target_date: datetime) -> bool:
         """
@@ -78,12 +79,18 @@ class SettlementEngine:
             total_studied_minutes = (h * 60) + m
             
             if total_studied_minutes >= target_minutes:
-                return 0 # 목표 100% 달성 벌금 없음
-            elif total_studied_minutes >= 60:
-                # 1시간(60분) 이상은 했으나 목표 미달
+                return 0 # 목표달성 벌금 없음
+                
+            # 목표시간 자체가 1시간(60분) 이하로 설정된 경우 (반휴, 서버점검 등)
+            # 이땐 실패해도 심각도 상관없이 -500원 부과 (사용자 룰)
+            if target_minutes <= 60:
+                return -self.FEE_MILD
+                
+            if total_studied_minutes >= 60:
+                # 1시간 이상은 했으나 목표 미달
                 return -self.FEE_MILD
             else:
-                # 1시간(60분) 미만 심각 미달
+                # 아예 1시간(60분) 미만 심각 미달
                 return -self.FEE_SEVERE
                 
         except Exception:

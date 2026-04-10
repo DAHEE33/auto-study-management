@@ -31,6 +31,20 @@ def run_daily_absence_job():
         if str(log.get("날짜", "")) == target_date:
             submitted_users.add(str(log.get("닉네임", "")))
             
+    # 2.5 Admin Calendar 자율참여 예외 확인
+    admin_events = sheets_client.get_sheet_records("Admin_Calendar")
+    is_optional_day = False
+    for event in admin_events:
+        if str(event.get("날짜", "")) == target_date:
+            if "자율참여" in str(event.get("적용방식", "")):
+                is_optional_day = True
+                break
+                
+    if is_optional_day:
+        print(f"🟢 {target_date} 일자는 Admin_Calendar 에 의해 [자율참여] 로 지정되었습니다.")
+        print("🟢 결석 벌금을 매기지 않고 Job을 정상 종료합니다.")
+        return
+            
     # 3. 결석자 판정 및 휴가 차감 로직 구현
     for member in active_members:
         nickname = str(member.get("닉네임", ""))
