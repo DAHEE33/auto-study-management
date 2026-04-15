@@ -170,13 +170,13 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 local_path = await download_image(image_url)
                 drive_url = drive_client.upload_image(local_path, f"{nickname}_{auth_type}_{now.strftime('%Y%m%d%H%M')}.jpg")
                 
-                # Mock: OCR 서비스가 (종료시각, 당일공부시간) 튜플을 반환한다고 가정
+                # OCR 서비스가 (종료시각, 당일공부시간(분), 누적시간(분)) 튜플 반환
                 ocr_result = ocr_service.extract_time_from_image(local_path)
                 os.remove(local_path)
                 
-                end_time, duration = ocr_result[0], ocr_result[1]
+                end_time, duration, total_mnts = ocr_result[0], ocr_result[1], ocr_result[2]
                 
-                if not end_time or not duration:
+                if not end_time or duration == 0:
                     reply_text = "❌ OCR 엔진이 시간 정보를 찾지 못했습니다. 숫자가 선명하게 나오도록 자르지 말고 다시 찍어주세요!"
                 else:
                     base_target = int(member_record.get("목표시간", 120))
@@ -189,15 +189,20 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     penalty = settlement_engine.calculate_penalty(final_target, duration, not is_ontime, is_fake_time, is_fake_date)
                     status_msg = "PASS" if penalty == 0 and is_ontime else ("경고(벌금)" if is_ontime else "지각전송(심사요망)")
                     
-                    # DB 로그 기록
-                    log_row = [target_date, nickname, auth_type, status_msg, "-", str(duration), "-", str(penalty), drive_url]
+                    # 당일시간(종류), 사진누적(분->시간)
+                    dur_str = f"{duration//60}시간 {duration%60}분"
+                    tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
+                    
+                    # DB 로그 (Daily_Log: 날짜, 닉네임, 종류, 판정, 승인여부, 당일시간, 사진누적, 벌금액, 증빙)
+                    log_row = [target_date, nickname, auth_type, status_msg, "-", dur_str, tot_str, str(penalty), drive_url]
                     sheets_client.append_row("Daily_Log", log_row)
                     
                     reply_text = (
                         f"✅ [{auth_type}] 인증 제출이 완료되었습니다!\n\n"
                         f"- 판정결과: {status_msg}\n"
-                        f"- 적용 목표시간: {final_target}분\n"
-                        f"- 인정 공부시간: {duration}분\n"
+                        f"- 적용 목표시간: {final_target//60}시간 {final_target%60}분\n"
+                        f"- 당일 공부시간: {dur_str}\n"
+                        f"- 누적 공부시간: {tot_str}\n"
                         f"- 규정 내 전송: {'네 (01시 이전)' if is_ontime else '아니오 (지각, 추후 벌금 심사)'}\n"
                         f"- 이번 인증 벌금: {penalty}원"
                     )
