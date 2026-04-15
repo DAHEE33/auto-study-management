@@ -1,100 +1,79 @@
-from datetime import datetime, timedelta
+from typing import List, Dict
 
 class SettlementEngine:
-    """
-    스터디 정산 및 시간 검증 핵심 비즈니스 로직
-    """
-
     def __init__(self):
-        # 벌금 기준표
-        self.FEE_MILD = 500   # 목표 미달(단, 1h 이상 수행 시)
-        self.FEE_SEVERE = 1000 # 1h 미만 수행 (또는 날짜 오류)
-        self.FEE_ABSENT = 2000 # 결석
-        self.FEE_FRAUD_FAKE = 5000 # 고의적 거짓 인증
-
-    def validate_dual_time(self, server_submit_time: datetime, ocr_end_time_str: str, target_date: datetime) -> bool:
-        """
-        [이중 시간 검증 (Dual-Time Validation)]
-        1. 제출 시각 (Server Time): target_date 익일 12:00 정오 마감
-        2. 공부 종료 시각 (OCR Time): target_date 익일 01:00 이전 종료 필수
+        pass
         
-        Args:
-            server_submit_time: 봇이 사용자로부터 이미지를 전송받은 실제 시각
-            ocr_end_time_str: "23:55" 과 같은 OCR 추출 문자열
-            target_date: 인증을 하려는 목표 일자 (보통 오늘)
-            
-        Returns:
-            정상 여부 (True/False)
+    def calculate_penalty(self, target_minutes: int, auth_minutes: int, is_late_submit: bool, is_fake_time: bool, is_fake_date: bool) -> int:
         """
-        try:
-            # 1. 서버 제출 시각 검증 로직 (익일 12:00 이전)
-            next_day_noon = target_date.replace(hour=12, minute=0, second=0, microsecond=0) + timedelta(days=1)
-            is_submit_valid = server_submit_time <= next_day_noon
+        벌금 산정 로직
+        - 결석(아예 전송 안한 경우): -2000 (이 함수 밖에서 일괄 배치 작업으로 산정)
+        - 시간 미달 (1시간 이상 인증): -500
+        - 시간 미달 (1시간 미만 인증): -1000
+        - 허위 인증 (날짜 등 불일치): -1000
+        - 거짓 인증 (누적시간 데이터 조작 등): -5000
+        """
+        if is_fake_time:
+            return -5000
             
-            if not is_submit_valid:
-                return False
-
-            # 2. OCR 종료 시각 검증 로직 ("HH:MM" 파싱 후 당일 01:00 이전인지 확인)
-            # 종료 시연: "23:55" 이거나 자정을 넘긴 "00:30" 일 수 있음.
-            hours, minutes = map(int, ocr_end_time_str.split(":"))
+        if is_fake_date:
+            return -1000
             
-            # 주의: "00:XX"는 실제로는 target_date의 '익일'이지만 스터디 룰상 당일분위 취급.
-            # 01:00 이전인지 확인
-            is_ocr_valid = False
-            if hours >= 1: # 01:xx ~ 23:xx
-                # 자정 이후(당일 01시~23시) 스터디는 정상 카운트 (보통 02시에 끝내면 탈락)
-                # 문서 기준 "당일 01:00 이전 종료 필수" -> 23:55은 당연히 통과.
-                # 새벽에 일찍 시작하는 사람은? (04:00 시작) -> 이건 예외 케이스 처리 필요 가능.
-                # 우선 문서대로 심플하게 01시를 넘기면 실패, 01~04시는 불가능 영역으로 가정.
-                if hours >= 4: # 예: 오전 4시 이후 ~ 23시 59분까지 공부 종료 시 통과
-                    is_ocr_valid = True
-                else:
-                    is_ocr_valid = False
+        if auth_minutes < target_minutes:
+            if auth_minutes >= 60:
+                return -500
             else:
-                # hours == 0 (00:00 ~ 00:59) -> 새벽 종료 인정
-                is_ocr_valid = True
+                return -1000
+                
+        # (규칙) 01:00 넘겨서 공부가 끝났더라도 목표시간을 달성하면 인정이지만,
+        # 01:00 이후에 보내는 "지각 발송" 건에 대해서는 추가 심사를 해야함.
+        # 일단 로직의 순수 벌금 금액은 0원을 반환 (추후 외부에서 01:00 타임스탬프와 비교).
+        return 0
 
-            return is_submit_valid and is_ocr_valid
-            
-        except Exception as e:
-            print(f"Time validation error: {e}")
-            return False
-
-    def calculate_penalty(self, duration_str: str, target_minutes: int) -> int:
+    def generate_weekly_report(self, start_date: str, end_date: str, daily_logs: List[Dict], master_members: List[Dict], admin_notice: str = "") -> str:
         """
-        [벌금 산정 로직]
-        Args:
-            duration_str: "02:30" 같은 총 공부 시간
-            target_minutes: Member_Master에 정의된 목표 공부 시간(분)
-            
-        Returns:
-            부과될 벌금액 (int, 마이너스 또는 0)
+        주간 결산 템플릿 생성기. (매주 토요일 정오 호출용)
+        - 배분: (총 벌금) / (벌금 0원 성실 멤버 수)
+        - 상금 대상, 예치금 경고 알림 등 포괄
         """
-        if not duration_str:
-            # 판독 불가 (부정/오류)
-            return -self.FEE_SEVERE
-            
-        try:
-            h, m = map(int, duration_str.split(":"))
-            total_studied_minutes = (h * 60) + m
-            
-            if total_studied_minutes >= target_minutes:
-                return 0 # 목표달성 벌금 없음
+        total_penalty_accumulated = 0
+        sincere_members = []
+        member_penalties = {m['닉네임']: 0 for m in master_members if str(m['상태']) == '활동'}
+        
+        # 1. 일주일치 로그에서 벌금 집계 (실제로는 date_string 필터링 필요)
+        for log in daily_logs:
+            try:
+                penalty_val = int(str(log.get('벌금액', '0')).replace(',', ''))
+            except:
+                penalty_val = 0
                 
-            # 목표시간 자체가 1시간(60분) 이하로 설정된 경우 (반휴, 서버점검 등)
-            # 이땐 실패해도 심각도 상관없이 -500원 부과 (사용자 룰)
-            if target_minutes <= 60:
-                return -self.FEE_MILD
+            nick = log.get('닉네임')
+            if nick in member_penalties:
+                if penalty_val < 0:
+                    member_penalties[nick] += abs(penalty_val)
+                    total_penalty_accumulated += abs(penalty_val)
+        
+        # 2. 성실 멤버 산정
+        for nick, pen_amt in member_penalties.items():
+            if pen_amt == 0:
+                sincere_members.append(nick)
                 
-            if total_studied_minutes >= 60:
-                # 1시간 이상은 했으나 목표 미달
-                return -self.FEE_MILD
-            else:
-                # 아예 1시간(60분) 미만 심각 미달
-                return -self.FEE_SEVERE
-                
-        except Exception:
-            return -self.FEE_SEVERE
+        # 3. 1/n 보상금액
+        reward_per_user = 0
+        if total_penalty_accumulated > 0 and len(sincere_members) > 0:
+            reward_per_user = total_penalty_accumulated // len(sincere_members)
 
-# Singleton
-engine = SettlementEngine()
+        # 4. 결산 텍스트 조립
+        report = f"[Study-Sync 주간 결산] 📅 {start_date} ~ {end_date}\n\n"
+        report += "이번 주도 고생 많으셨습니다!\n정산 결과를 발표합니다.\n\n"
+        report += f"💰 벌금 합계: {total_penalty_accumulated:,}원\n"
+        report += f"💰 1/n 배분액: +{reward_per_user:,}원 (성실멤버 {len(sincere_members)}명)\n\n"
+        
+        report += "📢 관리자 공지사항:\n"
+        report += "-" * 25 + "\n"
+        report += f"{admin_notice if admin_notice else '특별한 공지사항이 없습니다.'}\n"
+        report += "-" * 25 + "\n"
+        
+        return report
+
+settlement_engine = SettlementEngine()
