@@ -4,15 +4,17 @@ class SettlementEngine:
     def __init__(self):
         pass
         
-    def calculate_penalty(self, target_minutes: int, auth_minutes: int, is_late_submit: bool, is_fake_time: bool, is_fake_date: bool) -> int:
+    def calculate_penalty(self, target_minutes: int, auth_minutes: int, is_late_submit: bool, is_fake_time: bool, is_fake_date: bool, is_absent: bool = False) -> int:
         """
         벌금 산정 로직
-        - 결석(아예 전송 안한 경우): -2000 (이 함수 밖에서 일괄 배치 작업으로 산정)
+        - 결석(아예 전송 안한 경우 거나 01~02시 목표 미달 시): -2000
         - 시간 미달 (1시간 이상 인증): -500
         - 시간 미달 (1시간 미만 인증): -1000
-        - 허위 인증 (날짜 등 불일치): -1000
-        - 거짓 인증 (누적시간 데이터 조작 등): -5000
+        - 허위 인증 (날짜/누적 오류): -1000 (날짜), -5000 (누적시간)
         """
+        if is_absent:
+            return -2000
+            
         if is_fake_time:
             return -5000
             
@@ -25,9 +27,6 @@ class SettlementEngine:
             else:
                 return -1000
                 
-        # (규칙) 01:00 넘겨서 공부가 끝났더라도 목표시간을 달성하면 인정이지만,
-        # 01:00 이후에 보내는 "지각 발송" 건에 대해서는 추가 심사를 해야함.
-        # 일단 로직의 순수 벌금 금액은 0원을 반환 (추후 외부에서 01:00 타임스탬프와 비교).
         return 0
 
     def generate_weekly_report(self, start_date: str, end_date: str, daily_logs: List[Dict], master_members: List[Dict], admin_notice: str = "") -> str:

@@ -85,6 +85,44 @@ class GoogleSheetsClient:
             print(f"Error appending to sheet {sheet_name}: {e}")
             return False
 
+    def upsert_daily_log(self, row_data: List):
+        """
+        Daily_Log 시트에 대해 같은 날짜, 같은 닉네임이 존재하면 해당 행을 덮어쓰고,
+        존재하지 않으면 맨 아래에 새 행을 추가(append)합니다.
+        row_data: [Date, Nickname, Type, Result, Approval, DailyTime, TotalTime, Penalty, ImageID]
+        """
+        if self.is_mock:
+            print(f"[MOCK] Upserted to Daily_Log: {row_data}")
+            return True
+            
+        try:
+            target_date = str(row_data[0])
+            target_nickname = str(row_data[1])
+            
+            worksheet = self.spreadsheet.worksheet("Daily_Log")
+            records = worksheet.get_all_records()
+            
+            for idx, row in enumerate(records):
+                if str(row.get("날짜", "")) == target_date and str(row.get("닉네임", "")) == target_nickname:
+                    # 일치하는 행을 찾음 (헤더가 1번 행이므로 데이터의 첫 번째 줄 인덱스는 2)
+                    row_idx = idx + 2
+                    
+                    # 해당 범위(A열~마지막 열) 덮어쓰기
+                    end_col_letter = chr(ord('A') + len(row_data) - 1)
+                    range_addr = f"A{row_idx}:{end_col_letter}{row_idx}"
+                    worksheet.update(range_addr, [row_data])
+                    print(f"🔄 Daily_Log 행 덮어쓰기(Override) 완료: {target_nickname} ({target_date})")
+                    return True
+                    
+            # 일치하는 행이 없으면 추가
+            worksheet.append_row(row_data)
+            print(f"➕ Daily_Log 새 행 추가 완료: {target_nickname} ({target_date})")
+            return True
+            
+        except Exception as e:
+            print(f"Error upserting to Daily_Log: {e}")
+            return False
+
     def update_cell(self, sheet_name: str, row: int, col: int, val):
         """특정 셀 업데이트 (잔여 휴무 수량 차감 등에 사용)"""
         if self.is_mock:

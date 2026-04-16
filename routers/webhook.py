@@ -15,6 +15,10 @@ from services.check_in_engine import check_in_engine
 
 router = APIRouter(prefix="/webhook", tags=["Webhook"])
 
+# 봇이 사용자 요청 맥락을 기억하기 위한 상태 저장소 (메모리 방식)
+# 형태: { "UserKey": {"type": "반휴" | "특휴", "expires": datetime_object} }
+user_states = {}
+
 def build_kakao_response(text: str) -> Dict[str, Any]:
     """카카오 i 챗봇 스펙에 맞춘 심플한 텍스트 응답 제네레이터"""
     return {
@@ -54,13 +58,44 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     
     # 1. UserKey 추출 및 멤버 확보
     userkey = user_request.get("user", {}).get("id", "")
+    
+    # 📝 [로그 출력] 챗봇이 보낸 UserKey를 서버 터미널에서 즉시 확인합니다.
+    print(f"\n================ [카카오 웹훅 수신] ================")
+    print(f"► 유저키(UserKey): {userkey}")
+    print(f"► 수신 텍스트(utterance): {utterance}")
+    print(f"====================================================\n")
+
+    # [신규 기능 1: 기기 연동] "등록 산들바람" 
+    if utterance.startswith("등록 "):
+        target_nick = utterance.replace("등록 ", "").strip()
+        records = sheets_client.get_sheet_records("Member_Master")
+        for idx, row in enumerate(records):
+            if str(row.get("닉네임", "")) == target_nick:
+                row_idx = idx + 2
+                # UserKey는 B열(2)
+                sheets_client.update_cell("Member_Master", row_idx, 2, userkey)
+                return build_kakao_response(f"✅ '{target_nick}'님의 기기가 정상적으로 연동되었습니다! 이제 인증이 가능합니다.")
+        return build_kakao_response(f"❌ 엑셀에 '{target_nick}' 이라는 닉네임이 존재하지 않습니다. 방장님께 먼저 닉네임 추가를 요청하세요.")
+
     member_record = sheets_client.get_member_by_userkey(userkey)
     
     if not member_record:
-        return build_kakao_response(f"❌ 승인되지 않은 사용자입니다.\nUserKey: {userkey}\n카카오톡 채널 방장에게 위 UserKey를 캡처해서 신규 멤버 등록을 요청해 주세요.")
+        return build_kakao_response(f"❌ 승인되지 않은 사용자입니다.\nUserKey: {userkey}\n카카오톡 채널 방장에게 위 UserKey를 캡처해서 신규 멤버 등록을 요청해 주세요.\n(또는 '등록 [닉네임]' 을 쳐서 자동 연동하세요)")
         
     nickname = member_record.get("닉네임", "Unkown")
     row_idx = member_record.get("_row_index", -1)
+
+    # [신규 기능 2: 목표 시간 변경] "목표변경 3시간"
+    if utterance.startswith("목표변경"):
+        import re
+        nums = re.findall(r'\d+', utterance)
+        if not nums:
+            return build_kakao_response("❌ 변경할 시간을 숫자로 입력해주세요. (예: 목표변경 3시간 또는 목표변경 180)")
+        
+        new_target_minutes = int(nums[0]) * 60 if "시간" in utterance else int(nums[0])
+        # 목표시간은 D열(4)
+        sheets_client.update_cell("Member_Master", row_idx, 4, str(new_target_minutes))
+        return build_kakao_response(f"✅ 목표 시간이 '{new_target_minutes//60}시간 {new_target_minutes%60}분'으로 변경 적용되었습니다!")
     
     # 2. 파라미터 또는 발화에서 이미지 URL 파싱
     image_url = ""
@@ -87,6 +122,24 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     is_month_off = "월휴" in utterance or "월휴" in block_name
     is_special_off = "특휴" in utterance or "특휴" in block_name
     is_status = "내 현황" in utterance or "현황" in block_name
+
+    # 💡 [블랙아웃 체크 (낮 12:00 ~ 16:59 차단)]
+    # 현황 조회를 제외한 모든 인증/신청/처리는 거부
+    if check_in_engine.is_blackout_time(now) and not is_status:
+        return build_kakao_response("❌ 처리 기간이 지났습니다.\n(당일 인증 및 휴가 처리는 17:00 부터 접수를 받습니다.)")
+
+    # 💡 [State 조회 및 적용] 
+    # 사진만 보냈더라도, 10분 내에 누른 버튼(특휴/반휴)이 있다면 해당 상태로 강제 지정합니다.
+    state = user_states.get(userkey)
+    if state and state["expires"] > now:
+        if state["type"] == "반휴":
+            is_half_off = True
+        elif state["type"] == "특휴":
+            is_special_off = True
+        
+        # 실제로 사진이 들어와서 인증 처리가 시작되면, 대기 상태를 소진(삭제)합니다.
+        if image_url:
+            del user_states[userkey]
 
     reply_text = ""
 
@@ -117,25 +170,25 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             # DB 잔여량 차감 반영
             sheets_client.update_cell("Member_Master", row_idx, col_idx, new_val)
             
-            # 로그 반영
+            # 로그 반영 (당일 기록 Override 적용)
             log_row = [target_date, nickname, leave_type, "PASS", "-", "0", "-", "0", "-"]
-            sheets_client.append_row("Daily_Log", log_row)
+            sheets_client.upsert_daily_log(log_row)
             
         reply_text = msg
 
     elif is_special_off:
         # [특휴 요청] - 관리자 승인 대기
         if not image_url:
-            reply_text = "🏥 특휴 처리를 위해 처방전이나 수험표 등의 증빙 사진을 함께 전송해 주세요."
+            # 특휴를 누르고 아직 사진을 안 보냈으므로 상태 기억!
+            user_states[userkey] = {"type": "특휴", "expires": now + timedelta(minutes=10)}
+            reply_text = "🏥 특휴 처리를 위해 처방전이나 수험표 등의 증빙 사진을 지금 전송해 주세요."
         else:
             try:
-                local_path = await download_image(image_url)
-                drive_url = drive_client.upload_image(local_path, f"{nickname}_special_{now.strftime('%Y%m%d%H%M')}.jpg")
-                os.remove(local_path)
+                drive_url = image_url # 카카오 사진 원본 링크를 직접 사용 (구글 드라이브 업로드 생략)
                 
-                # '대기', 승인여부 'N'
+                # '대기', 승인여부 'N' (기존 기록이 있다면 덮어쓰기)
                 log_row = [target_date, nickname, "특휴", "대기", "N", "-", "-", "0", drive_url]
-                sheets_client.append_row("Daily_Log", log_row)
+                sheets_client.upsert_daily_log(log_row)
                 reply_text = "🏥 특휴 증빙 사진이 정상 접수되었습니다. 방장 확인(승인) 전까지는 대기 상태가 유지됩니다."
             except Exception as e:
                 reply_text = f"이미지 업로드 중 에러 발생: {e}"
@@ -144,7 +197,9 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         # [일반 인증 / 반휴 인증] (이미지가 들어왔거나 요청하는 경우)
         if not image_url:
             if is_half_off:
-                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 같이 전송해 주세요. (예: 캡처 전송 시 텍스트로 '반휴' 입력)"
+                # 반휴 누르고 아직 사진 안 보냈으므로 상태 기억!
+                user_states[userkey] = {"type": "반휴", "expires": now + timedelta(minutes=10)}
+                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요. (이제 текст 없이 사진만 보내도 됩니다!)"
             else:
                 reply_text = "🔥 타이머와 누적시간이 잘 보이는 [구루미 메인 화면] 캡처 사진을 전송해 주셔야 공부 판독이 가능합니다."
         else:
@@ -168,7 +223,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 is_ontime = check_in_engine.is_within_deadline(now)
                 
                 local_path = await download_image(image_url)
-                drive_url = drive_client.upload_image(local_path, f"{nickname}_{auth_type}_{now.strftime('%Y%m%d%H%M')}.jpg")
+                drive_url = image_url # 카카오 사진 원본 링크 직접 사용 (구글 드라이브 업로드 생략)
                 
                 # OCR 서비스가 (종료시각, 당일공부시간(분), 누적시간(분)) 튜플 반환
                 ocr_result = ocr_service.extract_time_from_image(local_path)
@@ -182,20 +237,52 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     base_target = int(member_record.get("목표시간", 120))
                     final_target = target_override * 60 if target_override else base_target
                     
-                    # 벌금 계산 (거짓/데이터조작 여부 로직은 별도로 OCR 누적시간 연동 필요)
-                    is_fake_time = False 
-                    is_fake_date = False
+                    # --- [신규 로직] 시간 위조 및 지각 검증 ---
+                    is_fake_date, is_absent, is_ontime = check_in_engine.validate_ocr_time(
+                        target_date, end_time, duration, final_target
+                    )
                     
-                    penalty = settlement_engine.calculate_penalty(final_target, duration, not is_ontime, is_fake_time, is_fake_date)
-                    status_msg = "PASS" if penalty == 0 and is_ontime else ("경고(벌금)" if is_ontime else "지각전송(심사요망)")
+                    # --- [신규 로직] 누적 시간(Total Time) 60분 오차 검증 ---
+                    is_fake_time = False
+                    old_acc_str = str(member_record.get("최종누적", "0")).replace(",", "")
+                    old_acc = int(old_acc_str) if old_acc_str.isdigit() else 0
+                    
+                    # 새 누적시간과 (구 누적 + 당일) 비교
+                    if total_mnts > 0:
+                        diff = abs((old_acc + duration) - total_mnts)
+                        if diff > 60:
+                            is_fake_time = True
+                            
+                    # 벌금 계산
+                    penalty = settlement_engine.calculate_penalty(
+                        target_minutes=final_target, 
+                        auth_minutes=duration, 
+                        is_late_submit=not is_ontime, 
+                        is_fake_time=is_fake_time, 
+                        is_fake_date=is_fake_date,
+                        is_absent=is_absent
+                    )
+                    
+                    if is_absent:
+                        status_msg = "결석(목표미달)"
+                    elif is_fake_date:
+                        status_msg = "허위(예전사진)" 
+                    elif is_fake_time:
+                        status_msg = "조작(누적오류)"
+                    else:
+                        status_msg = "PASS" if penalty == 0 else "경고/지각발송"
                     
                     # 당일시간(종류), 사진누적(분->시간)
                     dur_str = f"{duration//60}시간 {duration%60}분"
                     tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
                     
-                    # DB 로그 (Daily_Log: 날짜, 닉네임, 종류, 판정, 승인여부, 당일시간, 사진누적, 벌금액, 증빙)
+                    # DB 로그 (Daily_Log: 날짜, 닉네임, 종류, 판정, 승인여부, 당일시간, 사진누적, 벌금액, 증빙) - Override 처리
                     log_row = [target_date, nickname, auth_type, status_msg, "-", dur_str, tot_str, str(penalty), drive_url]
-                    sheets_client.append_row("Daily_Log", log_row)
+                    sheets_client.upsert_daily_log(log_row)
+                    
+                    # 누적 시간 갱신 (정상 PASS일 때만, 혹은 fake가 아닐 때. 5는 E열)
+                    if not is_fake_date and not is_fake_time and total_mnts > 0:
+                        sheets_client.update_cell("Member_Master", row_idx, 5, str(total_mnts)) 
                     
                     reply_text = (
                         f"✅ [{auth_type}] 인증 제출이 완료되었습니다!\n\n"
@@ -203,7 +290,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         f"- 적용 목표시간: {final_target//60}시간 {final_target%60}분\n"
                         f"- 당일 공부시간: {dur_str}\n"
                         f"- 누적 공부시간: {tot_str}\n"
-                        f"- 규정 내 전송: {'네 (01시 이전)' if is_ontime else '아니오 (지각, 추후 벌금 심사)'}\n"
+                        f"- 사진 인식시점: {end_time}\n"
                         f"- 이번 인증 벌금: {penalty}원"
                     )
 
