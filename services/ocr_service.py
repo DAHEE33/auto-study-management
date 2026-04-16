@@ -29,16 +29,16 @@ class OCRService:
         m = int(match.group(2) or 0)
         return h * 60 + m
 
-    def extract_time_from_image(self, image_path: str) -> Tuple[Optional[str], int, int]:
+    def extract_time_from_image(self, image_path: str) -> Tuple[Optional[str], int, int, str]:
         """
         구루미 UI 이미지에서 텍스트를 파싱하여 공부 종료 시각과 순공 시간을 추출합니다.
         Returns:
-            (종료시각 "YYYY-MM-DD HH:MM:SS" 또는 "HH:MM", 당일시간(분), 누적시간(분))
+            (종료시각 "YYYY-MM-DD HH:MM:SS" 또는 "HH:MM", 당일시간(분), 누적시간(분), OCR원문텍스트)
         """
         if self.is_mock:
             # Mock 데이터 반환 (테스트용)
             print(f"[MOCK] OCR 추출 진행: {image_path}")
-            return "23:55", 120, 8550  # 2시간, 142시간 30분
+            return "23:55", 120, 8550, "dev_user 2시간 142시간 30분 2026-04-15 20:49:02"
             
         try:
             with open(image_path, "rb") as image_file:
@@ -83,10 +83,10 @@ class OCRService:
                 daily_mnts = min(val1, val2)
                 total_mnts = max(val1, val2)
             
-            return end_time, daily_mnts, total_mnts
+            return end_time, daily_mnts, total_mnts, full_text
             
         except Exception as e:
             print(f"OCR Error: {e}")
-            return None, 0, 0
+            return None, 0, 0, ""
 
 ocr_service = OCRService()

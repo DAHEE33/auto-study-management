@@ -29,9 +29,9 @@ def build_kakao_response(text: str) -> Dict[str, Any]:
                 {"messageText": "인증", "action": "message", "label": "🔥 일반 인증"},
                 {"messageText": "반휴 인증", "action": "message", "label": "🌗 반휴 사용"},
                 {"messageText": "주휴 사용", "action": "message", "label": "🏖️ 주휴 사용"},
-                {"messageText": "월휴 사용", "action": "message", "label": "🏖️ 월휴 사용"},
                 {"messageText": "특휴 증빙하기", "action": "message", "label": "🏥 특휴 신청"},
-                {"messageText": "내 현황", "action": "message", "label": "📈 내 현황 확인"}
+                {"messageText": "내 현황", "action": "message", "label": "📈 내 현황 확인"},
+                {"messageText": "목표 변경", "action": "message", "label": "🎯 목표시간 변경"}
             ]
         }
     }
@@ -85,12 +85,12 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     nickname = member_record.get("닉네임", "Unkown")
     row_idx = member_record.get("_row_index", -1)
 
-    # [신규 기능 2: 목표 시간 변경] "목표변경 3시간"
-    if utterance.startswith("목표변경"):
+    # [신규 기능 2: 목표 시간 변경] "목표변경 3시간" 또는 버튼 클릭
+    if utterance.startswith("목표변경") or "목표 변경" in utterance:
         import re
         nums = re.findall(r'\d+', utterance)
         if not nums:
-            return build_kakao_response("❌ 변경할 시간을 숫자로 입력해주세요. (예: 목표변경 3시간 또는 목표변경 180)")
+            return build_kakao_response("❌ 죄송합니다. 형식이 올바르지 않습니다. 다시 입력해주세요.\n(예시: 목표변경 3시간, 목표변경 240)")
         
         new_target_minutes = int(nums[0]) * 60 if "시간" in utterance else int(nums[0])
         # 목표시간은 D열(4)
@@ -127,6 +127,18 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     # 현황 조회를 제외한 모든 인증/신청/처리는 거부
     if check_in_engine.is_blackout_time(now) and not is_status:
         return build_kakao_response("❌ 처리 기간이 지났습니다.\n(당일 인증 및 휴가 처리는 17:00 부터 접수를 받습니다.)")
+
+    # 💡 [휴무일(자율참여) 우선 차단]
+    admin_events = sheets_client.get_sheet_records("Admin_Config")
+    is_optional_day = False
+    for event in admin_events:
+        if str(event.get("날짜", "")).strip() == target_date:
+            if "자율참여" in str(event.get("이벤트 타입", "")):
+                is_optional_day = True
+                break
+                
+    if is_optional_day and not is_status:
+        return build_kakao_response("🏖️ 오늘은 [자율참여(휴무일)] 지정일입니다!\n\n거짓 인증, 휴가(반휴/주휴) 차감 등 일체의 스터디 인증이 필요하지 않습니다. 마음 편히 쉬시거나 자율적으로 공부해주세요! 🎉")
 
     # 💡 [State 조회 및 적용] 
     # 사진만 보냈더라도, 10분 내에 누른 버튼(특휴/반휴)이 있다면 해당 상태로 강제 지정합니다.
@@ -225,16 +237,22 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 local_path = await download_image(image_url)
                 drive_url = image_url # 카카오 사진 원본 링크 직접 사용 (구글 드라이브 업로드 생략)
                 
-                # OCR 서비스가 (종료시각, 당일공부시간(분), 누적시간(분)) 튜플 반환
+                # OCR 서비스가 (종료시각, 당일공부시간(분), 누적시간(분), 원문) 튜플 반환
                 ocr_result = ocr_service.extract_time_from_image(local_path)
                 os.remove(local_path)
                 
-                end_time, duration, total_mnts = ocr_result[0], ocr_result[1], ocr_result[2]
+                end_time, duration, total_mnts, full_text = ocr_result[0], ocr_result[1], ocr_result[2], ocr_result[3]
                 
                 if not end_time or duration == 0:
                     reply_text = "❌ OCR 엔진이 시간 정보를 찾지 못했습니다. 숫자가 선명하게 나오도록 자르지 말고 다시 찍어주세요!"
                 else:
-                    base_target = int(member_record.get("목표시간", 120))
+                    bt_str = str(member_record.get("목표시간", "120")).strip()
+                    import re
+                    nums = re.findall(r'\d+', bt_str)
+                    if not nums:
+                        base_target = 120
+                    else:
+                        base_target = int(nums[0]) * 60 if "시간" in bt_str else int(nums[0])
                     final_target = target_override * 60 if target_override else base_target
                     
                     # --- [신규 로직] 시간 위조 및 지각 검증 ---
@@ -242,12 +260,21 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         target_date, end_time, duration, final_target
                     )
                     
-                    # --- [신규 로직] 누적 시간(Total Time) 60분 오차 검증 ---
+                    # --- [신규 로직] 누적 시간(Total Time) 60분 오차 및 닉네임 교차 검증 ---
                     is_fake_time = False
+                    is_fake_nickname = False
+                    
+                    # 1. 닉네임 일치 검사
+                    # 닉네임에서 공백을 제거한 기준으로도 검색 (오인식 대비)
+                    clean_nick = nickname.replace(" ", "")
+                    # OCR 텍스트 내에서 본인 닉네임이 발견 안 되면 타인 사진 도용으로 간주
+                    if clean_nick not in full_text.replace(" ", ""):
+                        is_fake_nickname = True
+                        
                     old_acc_str = str(member_record.get("최종누적", "0")).replace(",", "")
                     old_acc = int(old_acc_str) if old_acc_str.isdigit() else 0
                     
-                    # 새 누적시간과 (구 누적 + 당일) 비교
+                    # 2. 누적시간 오차 검사
                     if total_mnts > 0:
                         diff = abs((old_acc + duration) - total_mnts)
                         if diff > 60:
@@ -258,7 +285,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         target_minutes=final_target, 
                         auth_minutes=duration, 
                         is_late_submit=not is_ontime, 
-                        is_fake_time=is_fake_time, 
+                        is_fake_time=is_fake_time or is_fake_nickname, # 닉네임 불일치도 조작(-5000)으로 동일 처리
                         is_fake_date=is_fake_date,
                         is_absent=is_absent
                     )
@@ -267,10 +294,19 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         status_msg = "결석(목표미달)"
                     elif is_fake_date:
                         status_msg = "허위(예전사진)" 
+                    elif is_fake_nickname:
+                        status_msg = "조작(타인사진)"
                     elif is_fake_time:
                         status_msg = "조작(누적오류)"
                     else:
                         status_msg = "PASS" if penalty == 0 else "경고/지각발송"
+                        
+                    # --- [신규 로직] 예치금 즉시 차감 ---
+                    if penalty < 0:
+                        old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+                        old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
+                        new_deposit = old_deposit + penalty # penalty는 -500 등 음수값
+                        sheets_client.update_cell("Member_Master", row_idx, 8, str(new_deposit)) # H열(8)이 예치금
                     
                     # 당일시간(종류), 사진누적(분->시간)
                     dur_str = f"{duration//60}시간 {duration%60}분"
@@ -281,7 +317,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     sheets_client.upsert_daily_log(log_row)
                     
                     # 누적 시간 갱신 (정상 PASS일 때만, 혹은 fake가 아닐 때. 5는 E열)
-                    if not is_fake_date and not is_fake_time and total_mnts > 0:
+                    if not is_fake_date and not is_fake_time and not is_fake_nickname and total_mnts > 0:
                         sheets_client.update_cell("Member_Master", row_idx, 5, str(total_mnts)) 
                     
                     reply_text = (
@@ -291,6 +327,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         f"- 당일 공부시간: {dur_str}\n"
                         f"- 누적 공부시간: {tot_str}\n"
                         f"- 사진 인식시점: {end_time}\n"
+                        f"- 감지된 닉네임 매칭: {'실패 (타인사진의심)' if is_fake_nickname else '성공'}\n"
                         f"- 이번 인증 벌금: {penalty}원"
                     )
 

@@ -23,7 +23,7 @@ def run_daily_absence_job():
     admin_events = sheets_client.get_sheet_records("Admin_Config")
     is_optional_day = False
     for event in admin_events:
-        if str(event.get("날짜", "")) == target_date:
+        if str(event.get("날짜", "")).strip() == target_date:
             if "자율참여" in str(event.get("이벤트 타입", "")):
                 is_optional_day = True
                 break
@@ -44,17 +44,29 @@ def run_daily_absence_job():
         if str(log.get("날짜", "")) == target_date:
             submitted_users.add(str(log.get("닉네임", "")))
             
-    # 4. 결석자 판정 및 DB 기록 ("날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간", "사진누적", "벌금액", "이미지ID")
-    for member in active_members:
+    # 4. 결석자 판정, DB 기록 및 예치금 자동 차감
+    for idx, member in enumerate(members):
+        if str(member.get("상태", "")) != "활동":
+            continue
+            
         nickname = str(member.get("닉네임", ""))
         
         if nickname not in submitted_users:
             print(f"⚠️ [{nickname}] 님은 {target_date} 로그 유효 기록이 없습니다. (결석 처리)")
             
+            # Daily Log 기록
             penalty_row = [target_date, nickname, "결석", "-", "-", "0시간 0분", "0시간 0분", "-2000", "-"]
             sheets_client.append_row("Daily_Log", penalty_row)
             
-            print(f"   -> ✔️ [처리 완료] {nickname}님 결석 벌금(-2000) 기록 작성")
+            # 예치금 차감 반영 (Member_Master)
+            old_deposit_str = str(member.get("예치금", "0")).replace(",", "")
+            old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
+            new_deposit = old_deposit - 2000
+            
+            row_idx = idx + 2 # 헤더 보정
+            sheets_client.update_cell("Member_Master", row_idx, 8, str(new_deposit)) # H열이 예치금(8번째)
+            
+            print(f"   -> ✔️ [처리 완료] {nickname}님 결석(-2000) 기록 확정 및 예치금 차감 완료")
 
     print("✅ Daily Absence Check Job Completed!")
 
