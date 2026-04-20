@@ -6,8 +6,8 @@
 ## 🛠 Tech Stack
 - **Language**: Python 3.11
 - **Framework**: FastAPI (Asynchronous)
-- **Cloud & DB**: Google Cloud Vision API (OCR), Google Sheets API (DB), Google Drive API (Storage)
-- **Infrastructure**: Railway (PaaS), 카카오 i 오픈빌더 스킬 연동
+- **Cloud & DB**: Google Cloud Vision API (OCR), Google Sheets API (DB)
+- **Infrastructure**: Oracle Cloud (Ubuntu), Nginx, Systemd, 카카오 i 오픈빌더 스킬
 - **CI/CD**: GitHub Actions (Cron Jobs)
 
 ---
@@ -47,11 +47,17 @@ auto-study-management/
 - 최상단 `credentials.json` GCP 서비스 계정 키 배치
 - `.env`에 `GOOGLE_SHEET_URL`, `GOOGLE_DRIVE_FOLDER_ID` 세팅
 
-### 2. 서버 구동
+### 2. 로컬 테스트 (Local)
 ```bash
 uvicorn main:app --reload --port 8000
 ```
-- Ngrok 설정: `ngrok http 8000` 실행 후 발급된 주소를 카카오 i 오픈빌더 서버 설정에 등록 후 테스트.
+- Ngrok 설정: `ngrok http 8000` 실행 후 생성된 주소를 오픈빌더에 등록하여 임시 테스트 진행.
+
+### 3. 클라우드 배포 (Production - Oracle Cloud)
+- **인스턴스**: Oracle Cloud Free Tier (Ubuntu)
+- **무중단 서비스 (Systemd)**: `studysync.service` 데몬을 생성하여 FastAPI(Uvicorn) 백그라운드 구동
+- **웹 서버 및 SSL**: Nginx 리버스 프록시 적용 후 `Certbot`으로 카카오 연동 필수 조건인 HTTPS 전면 적용
+- 카카오 오픈빌더 스킬에 발급받은 최종 도메인 주소 등록 완료
 
 ---
 

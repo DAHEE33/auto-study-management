@@ -1,0 +1,25 @@
+name: Deploy to Oracle Cloud
+
+on:
+  push:
+    branches:
+      - main # main 브랜치에 푸시될 때마다 실행 (또는 master)
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to Server via SSH
+        uses: appleboy/ssh-action@v1.0.3 # SSH 접속을 도와주는 액션
+        with:
+          host: ${{ secrets.HOST }} # 오라클 클라우드 공인 IP
+          username: ${{ secrets.USERNAME }} # 기본값: ubuntu
+          key: ${{ secrets.SSH_KEY }} # 접속에 사용했던 프라이빗 키 (.pem 파일 내용)
+          port: 22
+          script: |
+            cd /home/ubuntu/auto-study-management
+            git pull origin main
+            source venv/bin/activate
+            pip install -r requirements.txt
+            sudo systemctl restart studysync
+            echo "Deploy Successful!"
