@@ -65,22 +65,45 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     print(f"► 수신 텍스트(utterance): {utterance}")
     print(f"====================================================\n")
 
-    # [신규 기능 1: 기기 연동] "등록 산들바람" 
-    if utterance.startswith("등록 "):
-        target_nick = utterance.replace("등록 ", "").strip()
-        records = sheets_client.get_sheet_records("Member_Master")
-        for idx, row in enumerate(records):
-            if str(row.get("닉네임", "")) == target_nick:
-                row_idx = idx + 2
-                # UserKey는 B열(2)
-                sheets_client.update_cell("Member_Master", row_idx, 2, userkey)
-                return build_kakao_response(f"✅ '{target_nick}'님의 기기가 정상적으로 연동되었습니다! 이제 인증이 가능합니다.")
-        return build_kakao_response(f"❌ 엑셀에 '{target_nick}' 이라는 닉네임이 존재하지 않습니다. 방장님께 먼저 닉네임 추가를 요청하세요.")
+    # 2. 파라미터 또는 발화에서 이미지 URL 파싱 (미등록 유저 사진 유무를 빨리 알기 위해 위로 올림)
+    image_url = ""
+    for key, value in params.items():
+        if isinstance(value, dict) and value.get("origin"):
+            origin_val = value["origin"]
+            if "http" in origin_val:
+                if origin_val.startswith("List(") and origin_val.endswith(")"):
+                    origin_val = origin_val[5:-1]
+                image_url = origin_val
+                break
+    
+    if not image_url and utterance.startswith("http"):
+        image_url = utterance
 
     member_record = sheets_client.get_member_by_userkey(userkey)
     
     if not member_record:
-        return build_kakao_response(f"❌ 승인되지 않은 사용자입니다.\nUserKey: {userkey}\n카카오톡 채널 방장에게 위 UserKey를 캡처해서 신규 멤버 등록을 요청해 주세요.\n(또는 '등록 [닉네임]' 을 쳐서 자동 연동하세요)")
+        # [자동 회원가입 로직]
+        # 이미지를 보냈거나, 텍스트가 너무 길거나(15자), 하단 퀵리플라이 버튼을 누른 경우 가입 안내 문구 발송
+        is_button_click = utterance in ["인증", "반휴 인증", "주휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"]
+        
+        if image_url or len(utterance) > 15 or is_button_click:
+            return build_kakao_response(
+                "✨ 환영합니다! 평일 저녁 인증 스터디 봇입니다.\n"
+                "구루미 닉네임 = 오픈채팅방 닉네임과 동일하게 등록합니다.\n\n"
+                "사용하실 닉네임만 채팅창에 짧게 입력해 주세요!\n"
+                "(예: 키뮤)"
+            )
+        
+        # 그 외의 짧은 텍스트는 닉네임으로 간주하여 즉시 등록
+        target_nick = utterance
+        new_row = [target_nick, userkey, "활동", "120", "0", "1.0", "1", "10000", "-"]
+        sheets_client.append_row("Member_Master", new_row)
+        
+        return build_kakao_response(
+            f"✅ '{target_nick}'님, 가입이 완료되었습니다!\n"
+            f"(🎁 기본 혜택: 주휴 1회, 월휴 1회, 예치금 10,000원)\n\n"
+            f"하단의 메뉴 버튼을 이용해 인증을 시작해 보세요."
+        )
         
     nickname = member_record.get("닉네임", "Unkown")
     row_idx = member_record.get("_row_index", -1)
@@ -96,20 +119,6 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         # 목표시간은 D열(4)
         sheets_client.update_cell("Member_Master", row_idx, 4, str(new_target_minutes))
         return build_kakao_response(f"✅ 목표 시간이 '{new_target_minutes//60}시간 {new_target_minutes%60}분'으로 변경 적용되었습니다!")
-    
-    # 2. 파라미터 또는 발화에서 이미지 URL 파싱
-    image_url = ""
-    for key, value in params.items():
-        if isinstance(value, dict) and value.get("origin"):
-            origin_val = value["origin"]
-            if "http" in origin_val:
-                if origin_val.startswith("List(") and origin_val.endswith(")"):
-                    origin_val = origin_val[5:-1]
-                image_url = origin_val
-                break
-    
-    if not image_url and utterance.startswith("http"):
-        image_url = utterance
 
     now = datetime.now()
     target_date = check_in_engine.get_target_date(now)
