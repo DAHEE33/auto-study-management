@@ -137,6 +137,24 @@ class GoogleSheetsClient:
             print(f"Error updating cell in {sheet_name}: {e}")
             return False
 
+    def get_daily_penalty(self, target_date: str, nickname: str) -> int:
+        """당일 기록된 벌금이 있다면 반환합니다 (주휴/월휴로 덮어쓸 때 환불용)"""
+        if self.is_mock:
+            return 0
+        try:
+            worksheet = self.spreadsheet.worksheet("Daily_Log")
+            records = worksheet.get_all_records()
+            for row in records:
+                if str(row.get("날짜", "")) == target_date and str(row.get("닉네임", "")) == nickname:
+                    try:
+                        return int(str(row.get("벌금액", "0")).replace(",", ""))
+                    except ValueError:
+                        return 0
+            return 0
+        except Exception as e:
+            print(f"Error fetching daily penalty: {e}")
+            return 0
+
     def setup_initial_data(self):
         """실제 구글 시트가 비어있을 경우 헤더와 초기 데이터를 최신 아키텍처 기준으로 주입합니다."""
         if self.is_mock or not self.spreadsheet:

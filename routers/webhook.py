@@ -191,6 +191,15 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             # DB 잔여량 차감 반영
             sheets_client.update_cell("Member_Master", row_idx, col_idx, new_val)
             
+            # --- [신규 로직] 만약 오늘 이미 결석/지각 등으로 벌금이 차감되어 있었다면 환불 ---
+            old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
+            if old_penalty < 0:
+                old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+                old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
+                new_deposit = old_deposit + abs(old_penalty) # 차감된 벌금만큼 100% 다시 더해줌
+                sheets_client.update_cell("Member_Master", row_idx, 8, str(new_deposit)) # H열(8)
+                msg += f"\n(기존 무효 처리: 부과되었던 패널티 {old_penalty}원이 예치금으로 반환되었습니다.)"
+            
             # 로그 반영 (당일 기록 Override 적용)
             log_row = [target_date, nickname, leave_type, "PASS", "-", "0", "-", "0", "-"]
             sheets_client.upsert_daily_log(log_row)
