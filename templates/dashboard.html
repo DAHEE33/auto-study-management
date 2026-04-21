@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Study-Sync 스터디 현황</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;800&display=swap" rel="stylesheet">
+    <style>
+        /* ======= VARIABLES ======= */
+        :root {
+            --bg: #090e17;
+            --glass-bg: rgba(20, 27, 45, 0.6);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --text-primary: #ffffff;
+            --text-secondary: #94a3b8;
+            
+            --accent: #8b5cf6; /* Purple */
+            --accent-light: #c4b5fd;
+            --accent-glow: rgba(139, 92, 246, 0.4);
+            
+            --pass-color: #10b981;
+            --fail-color: #ef4444;
+            --leave-color: #f59e0b;
+            
+            --font-main: 'Pretendard', sans-serif;
+            --font-num: 'Outfit', sans-serif;
+        }
+
+        /* ======= GLOBAL ======= */
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: var(--font-main);
+            background-color: var(--bg);
+            background-image: 
+                radial-gradient(circle at 0% 0%, rgba(139, 92, 246, 0.15) 0%, transparent 40%),
+                radial-gradient(circle at 100% 100%, rgba(59, 130, 246, 0.1) 0%, transparent 40%);
+            background-attachment: fixed;
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+        }
+        
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            padding: 40px 20px;
+        }
+
+        /* ======= TYPOGRAPHY ======= */
+        h1, h2, h3 { margin: 0; font-weight: 600; }
+        .gradient-text {
+            background: linear-gradient(135deg, #a78bfa, #60a5fa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .num-font { font-family: var(--font-num); }
+
+        /* ======= HEADER & PERSONAL DASHBOARD ======= */
+        .section-title {
+            font-size: 1.5rem;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .personal-card {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 24px;
+            padding: 30px;
+            margin-bottom: 40px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 30px;
+            align-items: center;
+        }
+
+        .user-greeting h1 {
+            font-size: 2.5rem;
+            margin-bottom: 5px;
+        }
+        .user-greeting .rank-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, #f59e0b, #fbbf24);
+            color: #000;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-weight: 800;
+            font-size: 0.9rem;
+            margin-bottom: 15px;
+            box-shadow: 0 4px 15px rgba(245, 158, 11, 0.4);
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 15px;
+        }
+
+        .stat-item {
+            background: rgba(0,0,0,0.3);
+            border-radius: 16px;
+            padding: 20px;
+            text-align: center;
+            border: 1px solid rgba(255,255,255,0.03);
+            transition: transform 0.2s;
+        }
+        .stat-item:hover {
+            transform: translateY(-5px);
+            border-color: var(--accent-glow);
+        }
+        .stat-label {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 800;
+        }
+        .stat-value.deposit { color: #34d399; }
+        .stat-value.leaves { color: #fbbf24; }
+        .stat-value.time { color: #60a5fa; }
+
+        /* ======= ERROR STATE ======= */
+        .error-card {
+            background: rgba(239, 68, 68, 0.1);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            padding: 20px;
+            border-radius: 12px;
+            text-align: center;
+            margin-bottom: 20px;
+            color: #fca5a5;
+        }
+
+        /* ======= TWO COLUMN LAYOUT ======= */
+        .layout-grid {
+            display: grid;
+            grid-template-columns: 3fr 1fr;
+            gap: 30px;
+        }
+
+        @media (max-width: 900px) {
+            .layout-grid { grid-template-columns: 1fr; }
+            .personal-card { grid-template-columns: 1fr; text-align: center; }
+            .stats-grid { grid-template-columns: 1fr 1fr; }
+            .user-greeting { display: flex; flex-direction: column; align-items: center; }
+        }
+
+        /* ======= BUTTON TABS ======= */
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+        }
+        .tab-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+            padding: 10px 24px;
+            border-radius: 30px;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+        }
+        .tab-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-primary);
+        }
+        .tab-btn.active {
+            background: var(--accent);
+            color: #fff;
+            border-color: var(--accent-light);
+            box-shadow: 0 0 15px var(--accent-glow);
+        }
+
+        /* ======= MATRIX TABLE (The Spreadsheet Evolved) ======= */
+        .matrix-container {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 24px;
+            padding: 25px;
+            overflow-x: auto;
+            /* 스크롤바 디자인 (웹킷 계열) */
+            scrollbar-width: thin;
+            scrollbar-color: var(--accent) rgba(0,0,0,0.3);
+        }
+        
+        .matrix-container::-webkit-scrollbar {
+            height: 8px;
+        }
+        .matrix-container::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.3);
+            border-radius: 4px;
+        }
+        .matrix-container::-webkit-scrollbar-thumb {
+            background: var(--accent);
+            border-radius: 4px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0 8px;
+            text-align: center;
+            min-width: 800px; /* 20명 이상일때 밀리지 않도록 고정 최소 너비 추가 */
+        }
+        
+        th {
+            color: var(--text-secondary);
+            font-weight: 500;
+            padding: 10px;
+            font-size: 0.9rem;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            white-space: nowrap;
+        }
+
+        .date-col {
+            position: sticky;
+            left: 0;
+            background: rgba(20, 27, 45, 0.9); /* Sticky일 때 뒤가 안 비치도록 솔리드 계열 처리 */
+            z-index: 5;
+            font-family: var(--font-num);
+            font-weight: 600;
+            color: var(--text-primary);
+            text-align: left;
+            padding-left: 10px;
+            white-space: nowrap;
+        }
+        th:first-child {
+            position: sticky;
+            left: 0;
+            background: rgba(20, 27, 45, 0.9);
+            z-index: 6;
+        }
+
+        td {
+            padding: 8px;
+        }
+
+        /* Badges */
+        .badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            font-size: 0.8rem;
+            cursor: help;
+            transition: all 0.2s;
+            position: relative;
+        }
+        
+        .badge:hover {
+            transform: scale(1.15);
+            z-index: 10;
+        }
+
+        /* 배지 색상 로직 */
+        .badge.pass {
+            background: rgba(16, 185, 129, 0.2);
+            color: var(--pass-color);
+            border: 1px solid rgba(16, 185, 129, 0.3);
+            box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+        }
+        .badge.fail {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--fail-color);
+            border: 1px solid rgba(239, 68, 68, 0.3);
+            font-weight: 800;
+            width: auto; height: 28px; border-radius: 8px; padding: 0 8px;
+        }
+        .badge.leave {
+            background: rgba(245, 158, 11, 0.2);
+            color: var(--leave-color);
+            border: 1px solid rgba(245, 158, 11, 0.3);
+        }
+        .badge.empty {
+            background: rgba(255, 255, 255, 0.03);
+            color: transparent;
+        }
+
+        /* Tooltip */
+        .badge:after {
+            content: attr(data-tooltip);
+            position: absolute;
+            bottom: 120%;
+            left: 50%;
+            transform: translateX(-50%) translateY(10px);
+            background: #1e293b;
+            color: #fff;
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 0.75rem;
+            white-space: nowrap;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.2s;
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.5);
+            pointer-events: none;
+            z-index: 100;
+        }
+        .badge:hover:after {
+            opacity: 1;
+            visibility: visible;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        /* ======= LEADERBOARD ======= */
+        .leaderboard-card {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 24px;
+            padding: 25px;
+        }
+        .lb-item {
+            display: flex;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px dashed rgba(255,255,255,0.05);
+        }
+        .lb-item:last-child {
+            border-bottom: none;
+        }
+        .lb-rank {
+            font-family: var(--font-num);
+            font-size: 1.5rem;
+            font-weight: 800;
+            width: 30px;
+            color: var(--text-secondary);
+        }
+        .lb-item:nth-child(1) .lb-rank { color: #fbbf24; text-shadow: 0 0 10px rgba(251, 191, 36, 0.5); }
+        .lb-item:nth-child(2) .lb-rank { color: #94a3b8; }
+        .lb-item:nth-child(3) .lb-rank { color: #b45309; }
+
+        .lb-info { flex: 1; padding-left: 15px; }
+        .lb-name { font-weight: 600; margin-bottom: 3px; }
+        .lb-time { font-size: 0.8rem; color: var(--accent-light); font-family: var(--font-num); }
+        
+    </style>
+</head>
+<body>
+
+<div class="container">
+    
+    <!-- TABS -->
+    <div class="tabs">
+        <a href="/dashboard?user={{ my_stats.nickname }}&view=weekly" class="tab-btn {% if is_weekly %}active{% endif %}">주간 현황</a>
+        <a href="/dashboard?user={{ my_stats.nickname }}&view=monthly" class="tab-btn {% if not is_weekly %}active{% endif %}">월간 현황</a>
+    </div>
+    
+    {% if not my_stats.is_valid %}
+    <div class="error-card">
+        <h3>해당 닉네임을 찾을 수 없습니다. ({{ my_stats.nickname }})</h3>
+        <p>파라미터를 확인하거나 그룹 내 등록된 닉네임인지 엑셀에서 확인해주세요.</p>
+    </div>
+    {% endif %}
+
+    <!-- 1. PERSONAL DASHBOARD -->
+    <div class="personal-card">
+        <div class="user-greeting">
+            <div class="rank-badge">🏆 방구석 {{ my_stats.total }}명 중 당당한 {{ my_stats.rank }}위!</div>
+            <h1>안녕하세요, <span class="gradient-text">{{ my_stats.nickname }}</span>님</h1>
+            <p style="color: var(--text-secondary); margin:0;">오늘도 당신의 목표를 달성해보세요.</p>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-item">
+                <div class="stat-label">예치금 현황</div>
+                <div class="stat-value num-font deposit">{{ my_stats.deposit }}</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">잔여 (주휴/월휴)</div>
+                <div class="stat-value num-font leaves">{{ my_stats.weekly_leave }} / {{ my_stats.monthly_leave }}</div>
+            </div>
+            <div class="stat-item">
+                <div class="stat-label">{% if is_weekly %}이번 주{% else %}이번 달{% endif %} 누적공부</div>
+                <div class="stat-value num-font time" style="font-size:1.4rem;">{{ my_stats.acc_time }}</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 2. LAYOUT GRID (Matrix + Leaderboard) -->
+    <div class="layout-grid">
+        
+        <!-- MATRIX SPREADSHEET EVOLVED -->
+        <div class="matrix-container">
+            <h2 class="section-title">📊 전체 고군분투 현황 ({% if is_weekly %}이번 주{% else %}이번 달{% endif %})</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width: 70px;">날짜</th>
+                        {% for nick in nicknames %}
+                        <th>{{ nick }}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for i in range(date_strs|length) %}
+                    {% set d_str = date_strs[i] %}
+                    {% set d_disp = display_dates[i] %}
+                    <tr>
+                        <td class="date-col">{{ d_disp }}</td>
+                        
+                        {% for nick in nicknames %}
+                        {% set cell = matrix[d_str][nick] %}
+                        
+                        <td>
+                            <!-- 로직에 따른 배지 렌더링 -->
+                            {% if cell.status == "-" %}
+                                <div class="badge empty" data-tooltip="기록 없음">-</div>
+                            
+                            {% elif cell.penalty < 0 %}
+                                <div class="badge fail" data-tooltip="{{ cell.tooltip }}">{{ cell.penalty }}</div>
+                                
+                            {% elif cell.type == "주휴" or cell.type == "월휴" or cell.type == "특휴" %}
+                                <div class="badge leave" data-tooltip="{{ cell.tooltip }}">🏖️</div>
+                                
+                            {% elif cell.type == "반휴" %}
+                                <div class="badge leave" style="background:rgba(245,158,11,0.4);" data-tooltip="{{ cell.tooltip }}">🌗</div>
+                            
+                            {% else %}
+                                <div class="badge pass" data-tooltip="{{ cell.tooltip }}">✓</div>
+                            {% endif %}
+                        </td>
+                        
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+
+        <!-- LEADERBOARD -->
+        <div class="leaderboard-card">
+            <h2 class="section-title" style="font-size: 1.2rem;">👑 명예의 전당</h2>
+            
+            {% for lb in leaderboard %}
+            <div class="lb-item">
+                <div class="lb-rank">{{ lb.rank }}</div>
+                <div class="lb-info">
+                    <div class="lb-name">{{ lb.nickname }}</div>
+                    <div class="lb-time">{{ lb.fmt_time }} 달성</div>
+                </div>
+            </div>
+            {% endfor %}
+            <p style="text-align:center; color:var(--text-secondary); font-size:0.8rem; margin-top:20px;">
+                순위는 {% if is_weekly %}이번 주{% else %}이번 달{% endif %} 공부시간 기준입니다.
+            </p>
+        </div>
+
+    </div>
+
+</div>
+
+</body>
+</html>

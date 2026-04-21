@@ -1,181 +1,176 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Request, Query
 from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from integrations.google_sheets import sheets_client
+from datetime import datetime, timedelta
+import os
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
 
+current_dir = os.path.dirname(os.path.realpath(__file__))
+templates_dir = os.path.join(os.path.dirname(current_dir), "templates")
+templates = Jinja2Templates(directory=templates_dir)
+
 @router.get("", response_class=HTMLResponse)
-async def view_dashboard():
+async def view_dashboard(request: Request, user: str = Query(None), view: str = Query("weekly")):
     """
-    스터디 현황을 보여주는 아름다운 실시간 대시보드 (Webview 연동용)
+    개인화된 스터디 현황과 순위, 그리고 그룹 전체 출석 매트릭스를 제공합니다.
+    view 파라미터가 'monthly' 이면 월간, 그 외에는 주간(weekly)으로 동작합니다.
     """
     members = sheets_client.get_sheet_records("Member_Master")
     logs = sheets_client.get_sheet_records("Daily_Log")
     
-    # 통계 계산
-    total_penalty = 0
-    member_stats = {m.get("닉네임", "Unknown"): {"penalty": 0, "logs": 0} for m in members}
+    active_members = [m for m in members if str(m.get("상태", "")) == "활동"]
+    
+    # 시간 추출 헬퍼 (예: 1시간 30분 -> 90 반환)
+    def parse_duration_to_min(dur_str):
+        if not dur_str: return 0
+        try:
+            h = 0
+            m = 0
+            if "시간" in dur_str:
+                parts = dur_str.split("시간")
+                h = int(parts[0].strip())
+                if "분" in parts[1]:
+                    m = int(parts[1].replace("분", "").strip())
+            elif "분" in dur_str:
+                m = int(dur_str.replace("분", "").strip())
+            return h * 60 + m
+        except:
+            return 0
+            
+    # 오늘 기준 주간/월간 날짜 범위 세팅
+    today = datetime.now()
+    if view == "monthly":
+        # 현재 달의 1일부터 말일까지 (간단히 1일부터 오늘까지 표출)
+        first_day = today.replace(day=1)
+        days_in_month = (today - first_day).days + 1
+        date_objs = [first_day + timedelta(days=i) for i in range(days_in_month)]
+    else:
+        # 이번 주 월요일 ~ 일요일 (0: 월요일, 6: 일요일)
+        weekday = today.weekday()
+        monday = today - timedelta(days=weekday)
+        date_objs = [monday + timedelta(days=i) for i in range(7)]
+        
+    date_strs = [d.strftime("%Y-%m-%d") for d in date_objs]
+    display_dates = [d.strftime("%m/%d(%a)") for d in date_objs]
+    
+    # 1. 누적 시간 직접 집계 (DB 최종누적 무시)
+    acc_map = {m.get("닉네임", ""): 0 for m in active_members}
     
     for log in logs:
-        nick = str(log.get("닉네임", ""))
-        penalty_str = str(log.get("벌금", "0")).replace(",", "")
-        try:
-            fine = int(penalty_str) if penalty_str and penalty_str != "-" else 0
-        except ValueError:
-            fine = 0
-            
-        total_penalty += abs(fine)
+        d_str = str(log.get("날짜", ""))
+        n_str = str(log.get("닉네임", ""))
+        dur = parse_duration_to_min(str(log.get("당일시간", "")))
         
-        if nick in member_stats:
-            member_stats[nick]["penalty"] += abs(fine)
-            member_stats[nick]["logs"] += 1
+        # view 범위에 맞는 로그만 합산
+        if d_str in date_strs and n_str in acc_map:
+            acc_map[n_str] += dur
             
-    # 정산 N빵 반영: '벌금 0원'인 멤버 수로만 N빵 배분 (100원 단위 절삭)
-    zero_penalty_count = sum(1 for stat in member_stats.values() if stat["penalty"] == 0)
-    split_bonus = 0
-    if zero_penalty_count > 0:
-        raw_bonus = total_penalty // zero_penalty_count
-        split_bonus = (raw_bonus // 100) * 100  # 100원 단위 절삭
-
-    # HTML 렌더링 카드 생성
-    cards_html = ""
-    for nick, stat in member_stats.items():
-        # 벌금이 0원인 사람만 보너스를 받음
-        bonus_display = f"<p class='bonus'>예상 정산(보너스): +{split_bonus}원</p>" if stat['penalty'] == 0 else "<p class='loss'>예상 정산: 보너스 대상 제외</p>"
+    # 2. 리더보드 구성 (동적 합산 기준 정렬)
+    ranked_nicks = sorted(acc_map.keys(), key=lambda k: acc_map[k], reverse=True)
+    
+    leaderboard = []
+    user_data = None
+    user_rank = "-"
+    user_acc_min = 0
+    
+    for idx, nick in enumerate(ranked_nicks):
+        rank = idx + 1
+        acc_min = acc_map[nick]
         
-        cards_html += f"""
-        <div class="card">
-            <h3>{nick}</h3>
-            <p>인증 횟수: <b>{stat['logs']}회</b></p>
-            <p>누적 벌금: <b>{stat['penalty']}원</b></p>
-            {bonus_display}
-        </div>
-        """
+        if rank <= 3 and acc_min > 0:
+            leaderboard.append({
+                "rank": rank,
+                "nickname": nick,
+                "fmt_time": f"{acc_min//60}h {acc_min%60}m"
+            })
+            
+        if nick == user:
+            user_rank = rank
+            user_acc_min = acc_min
+            # Member 데이터 매칭
+            for m in active_members:
+                if m.get("닉네임") == nick:
+                    user_data = m
+                    break
+                    
+    total_members = len(active_members)
 
-    html_content = f"""
-    <!DOCTYPE html>
-    <html lang="ko">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Study-Sync 통계 대시보드</title>
-        <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;500;700&display=swap" rel="stylesheet">
-        <style>
-            :root {{
-                --bg-color: #0f172a;
-                --card-bg: rgba(30, 41, 59, 0.7);
-                --text-main: #f8fafc;
-                --text-muted: #94a3b8;
-                --accent: #3b82f6;
-                --accent-glow: rgba(59, 130, 246, 0.5);
-            }}
-            body {{
-                font-family: 'Outfit', sans-serif;
-                background-color: var(--bg-color);
-                color: var(--text-main);
-                margin: 0;
-                padding: 40px 20px;
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-            }}
-            .container {{
-                max-width: 800px;
-                width: 100%;
-            }}
-            .header {{
-                text-align: center;
-                margin-bottom: 40px;
-            }}
-            h1 {{
-                font-size: 2.5rem;
-                margin: 0 0 10px 0;
-                background: linear-gradient(to right, #60a5fa, #a78bfa);
-                -webkit-background-clip: text;
-                -webkit-text-fill-color: transparent;
-            }}
-            .summary-box {{
-                background: linear-gradient(145deg, var(--card-bg), rgba(15, 23, 42, 0.9));
-                border: 1px solid rgba(255, 255, 255, 0.1);
-                border-radius: 20px;
-                padding: 30px;
-                text-align: center;
-                box-shadow: 0 10px 30px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.1);
-                backdrop-filter: blur(10px);
-                margin-bottom: 40px;
-            }}
-            .summary-box h2 {{
-                margin: 0;
-                font-weight: 300;
-                color: var(--text-muted);
-            }}
-            .total-penalty {{
-                font-size: 3.5rem;
-                font-weight: 700;
-                color: #ef4444;
-                margin: 10px 0 0 0;
-                text-shadow: 0 0 20px rgba(239, 68, 68, 0.4);
-            }}
-            .grid {{
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
-                gap: 20px;
-            }}
-            .card {{
-                background: var(--card-bg);
-                border: 1px solid rgba(255, 255, 255, 0.05);
-                border-radius: 15px;
-                padding: 20px;
-                transition: transform 0.3s ease, box-shadow 0.3s ease;
-                backdrop-filter: blur(5px);
-            }}
-            .card:hover {{
-                transform: translateY(-5px);
-                box-shadow: 0 10px 20px var(--accent-glow);
-                border-color: var(--accent);
-            }}
-            .card h3 {{
-                margin-top: 0;
-                border-bottom: 1px solid rgba(255,255,255,0.1);
-                padding-bottom: 10px;
-            }}
-            .bonus {{
-                color: #10b981;
-                font-weight: bold;
-                background: rgba(16, 185, 129, 0.1);
-                padding: 8px;
-                border-radius: 8px;
-                display: inline-block;
-                margin-top: 10px;
-            }}
-            .loss {{
-                color: #ef4444;
-                font-weight: bold;
-                background: rgba(239, 68, 68, 0.1);
-                padding: 8px;
-                border-radius: 8px;
-                display: inline-block;
-                margin-top: 10px;
-            }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>Study-Sync Dashboard</h1>
-                <p>실시간 스터디 정산 현황</p>
-            </div>
+    # 3. 내 데이터 세팅
+    if user_data:
+        my_stats = {
+            "is_valid": True,
+            "nickname": user,
+            "rank": user_rank,
+            "total": total_members,
+            "weekly_leave": user_data.get("주간휴무", "0"),
+            "monthly_leave": user_data.get("남은월휴", "0"),
+            "deposit": user_data.get("예치금", "0"),
+            "acc_time": f"{user_acc_min//60}시간 {user_acc_min%60}분"
+        }
+    else:
+        my_stats = {
+            "is_valid": False,
+            "nickname": user if user else "로그인 필요",
+            "rank": "-",
+            "total": total_members,
+            "weekly_leave": "-",
+            "monthly_leave": "-",
+            "deposit": "-",
+            "acc_time": "0시간 0분"
+        }
+    
+    # 4. 매트릭스 피벗
+    matrix = {}
+    for d in date_strs:
+        matrix[d] = {n: {"status": "-", "type": "-", "penalty": 0, "dur_str": "", "tooltip": "기록 없음"} for n in ranked_nicks}
+        
+    for log in logs:
+        d = str(log.get("날짜", ""))
+        n = str(log.get("닉네임", ""))
+        
+        if d in matrix and n in matrix[d]:
+            status = str(log.get("판정", ""))
+            ltype = str(log.get("유형", ""))
+            dur = str(log.get("당일시간", ""))
             
-            <div class="summary-box">
-                <h2>현재 이번 주 누적 벌금 전체</h2>
-                <div class="total-penalty">{total_penalty:,} 원</div>
-            </div>
+            try:
+                pen = int(str(log.get("벌금액", "0")).replace(",", ""))
+            except ValueError:
+                pen = 0
             
-            <div class="grid">
-                {cards_html}
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    return html_content
+            # 툴팁
+            if pen < 0:
+                tooltip = f"{status}({pen}원) | {dur}"
+            elif ltype in ["주휴", "월휴", "특휴"]:
+                tooltip = f"[{ltype}]"
+            elif ltype == "반휴":
+                tooltip = f"반휴({pen}원) | {dur}"
+            else:
+                tooltip = f"PASS | {dur}"
+                
+            matrix[d][n] = {
+                "status": status,
+                "type": ltype,
+                "penalty": pen,
+                "dur_str": dur,
+                "tooltip": tooltip
+            }
+
+    # 현재 뷰 상태 파악
+    is_weekly = (view != "monthly")
+
+    return templates.TemplateResponse(
+        request=request,
+        name="dashboard.html",
+        context={
+            "my_stats": my_stats,
+            "leaderboard": leaderboard,
+            "date_strs": date_strs,
+            "display_dates": display_dates,
+            "nicknames": ranked_nicks,
+            "matrix": matrix,
+            "is_weekly": is_weekly
+        }
+    )

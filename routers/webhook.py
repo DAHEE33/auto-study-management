@@ -165,17 +165,18 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     reply_text = ""
 
     if is_status:
-        # [현황 조회]
-        deposit = member_record.get("예치금", "0")
-        w_leave = member_record.get("주간휴무", "0")
-        m_leave = member_record.get("남은월휴", "0")
+        # [현황 조회 - 대시보드 링크 제공]
+        import urllib.parse
+        encoded_nick = urllib.parse.quote(nickname)
+        
+        # request.base_url은 접속된 도메인(예: http://oracle-ip/)을 자동으로 반환합니다.
+        # ngrok이나 포워딩이 있으면 스키마가 다를 수 있지만 기본적으로 동작
+        dashboard_url = f"{request.base_url}dashboard?user={encoded_nick}"
         
         reply_text = (
-            f"📊 [{nickname}님의 현황 요약]\n\n"
-            f"🔸 남은 주간휴무: {w_leave} 회\n"
-            f"🔸 남은 월휴: {m_leave} 회\n"
-            f"🔹 남은 예치금: {deposit} 원\n\n"
-            f"📌 주별/월별 상세 통계는 구글 시트를 통해 확인이 가능합니다."
+            f"✨ [{nickname}]님을 위한 전용 대시보드가 준비되었습니다!\n\n"
+            f"👇 아래 링크(개인 전용)를 눌러 실시간 스터디 순위와 잔디심기 현황을 가장 예쁜 화면으로 확인하세요!\n\n"
+            f"🔗 {dashboard_url}"
         )
 
     elif is_week_off or is_month_off:

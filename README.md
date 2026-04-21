@@ -43,7 +43,7 @@ auto-study-management/
 ## 🏃 빠른 시작 (Quick Start)
 
 ### 1. 환경 설정
-- `pip install fastapi uvicorn gspread oauth2client python-dotenv google-api-python-client google-auth-httplib2 google-auth-oauthlib google-cloud-vision httpx`
+- `pip install fastapi uvicorn gspread oauth2client python-dotenv google-api-python-client google-auth-httplib2 google-auth-oauthlib google-cloud-vision httpx jinja2`
 - 최상단 `credentials.json` GCP 서비스 계정 키 배치
 - `.env`에 `GOOGLE_SHEET_URL`, `GOOGLE_DRIVE_FOLDER_ID` 세팅
 
