@@ -113,8 +113,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         import re
         nums = re.findall(r'\d+', utterance)
         if not nums:
-            return build_kakao_response("❌ 죄송합니다. 형식이 올바르지 않습니다. 다시 입력해주세요.\n(예시: 목표변경 3시간, 목표변경 240)")
-        
+            return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 3시간\n👉 목표변경 120\n👉 목표변경 2시간 30분")
+            
         new_target_minutes = int(nums[0]) * 60 if "시간" in utterance else int(nums[0])
         # 목표시간은 D열(4)
         sheets_client.update_cell("Member_Master", row_idx, 4, str(new_target_minutes))
