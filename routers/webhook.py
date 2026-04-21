@@ -234,9 +234,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     return build_kakao_response(msg)
                 
                 target_override = 1 # 반휴는 목표 1시간으로 고정
-                col_idx = 6 # 주간휴무 컬럼 
-                new_val = max(0.0, float(member_record.get("주간휴무", "0")) - deduct_amt)
-                sheets_client.update_cell("Member_Master", row_idx, col_idx, new_val)
+                pending_deduct_amt = deduct_amt # 검증 통과 시 차감하기 위해 보류
 
             # 이미지 파싱 프로세스 (추후 5초 타임아웃 회피를 위해 큐 혹은 콜백 설계 고려)
             try:
@@ -309,6 +307,12 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         status_msg = "조작(누적오류)"
                     else:
                         status_msg = "PASS" if penalty == 0 else "경고/지각발송"
+                        
+                    # --- [신규 로직] 반휴 차감 적용 (성공 또는 지각일 때만) ---
+                    if auth_type == "반휴" and not is_absent and not is_fake_date and not is_fake_time and not is_fake_nickname:
+                        col_idx = 6 # 주간휴무 컬럼
+                        new_val = max(0.0, float(member_record.get("주간휴무", "0")) - pending_deduct_amt)
+                        sheets_client.update_cell("Member_Master", row_idx, col_idx, str(new_val))
                         
                     # --- [신규 로직] 예치금 즉시 차감 ---
                     if penalty < 0:
