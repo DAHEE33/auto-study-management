@@ -292,7 +292,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     old_acc = int(old_acc_str) if old_acc_str.isdigit() else 0
                     
                     # 2. 누적시간 오차 검사
-                    if total_mnts > 0:
+                    # 만약 old_acc 가 0 이라면 가입 후 첫 인증이거나 누적 초기화 상태이므로 예외 패스 처리
+                    if total_mnts > 0 and old_acc > 0:
                         diff = abs((old_acc + duration) - total_mnts)
                         if diff > 60:
                             is_fake_time = True
