@@ -297,7 +297,10 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         is_absent=is_absent
                     )
                     
-                    if is_absent:
+                    # 미달 판단: 1시 이후 전송실패(is_absent)이거나 인증 시간이 목표시간(반휴 1시간)에 못 미칠 때
+                    is_failed = is_absent or (duration < final_target)
+
+                    if is_failed:
                         status_msg = "결석(목표미달)"
                     elif is_fake_date:
                         status_msg = "허위(예전사진)" 
@@ -308,8 +311,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     else:
                         status_msg = "PASS" if penalty == 0 else "경고/지각발송"
                         
-                    # --- [신규 로직] 반휴 차감 적용 (성공 또는 지각일 때만) ---
-                    if auth_type == "반휴" and not is_absent and not is_fake_date and not is_fake_time and not is_fake_nickname:
+                    # --- [신규 로직] 반휴 차감 적용 (시간 미달/조작이 아닐 때만) ---
+                    if auth_type == "반휴" and not is_failed and not is_fake_date and not is_fake_time and not is_fake_nickname:
                         col_idx = 6 # 주간휴무 컬럼
                         new_val = max(0.0, float(member_record.get("주간휴무", "0")) - pending_deduct_amt)
                         sheets_client.update_cell("Member_Master", row_idx, col_idx, str(new_val))
