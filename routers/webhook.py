@@ -264,12 +264,13 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             if is_half_off:
                 # 반휴 누르고 아직 사진 안 보냈으므로 상태 기억!
                 user_states[userkey] = {"type": "반휴", "expires": now + timedelta(minutes=10)}
-                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요. (이제 텍스트 없이 사진만 보내도 됩니다!)"
+                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요."
             else:
                 reply_text = "🔥 타이머와 누적시간이 잘 보이는 [구루미 메인 화면] 캡처 사진을 전송해 주셔야 공부 판독이 가능합니다."
         else:
             auth_type = "반휴" if is_half_off else "일반"
             target_override = None
+            pending_deduct_amt = 0
             
             # 반휴일 경우 우선 잔여휴무 검증
             if auth_type == "반휴":
@@ -280,26 +281,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 target_override = 1 # 반휴는 목표 1시간으로 고정
                 pending_deduct_amt = deduct_amt # 검증 통과 시 차감하기 위해 보류
 
-            # --- [신규 로직: 5초 타임아웃 회피를 위한 카카오 콜백 처리] ---
-            callback_url = user_request.get("callbackUrl")
-            
-            if callback_url:
-                # 콜백 URL이 활성화된 경우 백그라운드로 넘기고 즉시 useCallback 응답
-                background_tasks.add_task(
-                    process_image_check_in_background,
-                    image_url=image_url,
-                    auth_type=auth_type,
-                    nickname=nickname,
-                    target_date=target_date,
-                    row_idx=row_idx,
-                    member_record=member_record,
-                    target_override=target_override,
-                    pending_deduct_amt=pending_deduct_amt if auth_type == "반휴" else 0,
-                    callback_url=callback_url
-                )
-                return {"version": "2.0", "useCallback": True}
-            
-            # 콜백이 비활성화된 경우 기존처럼 동기 처리 (5초 초과 시 카카오 응답 씹힘 발생 가능)
+            # 타임아웃 방지: OCR만 동기처리, 구글시트 업데이트는 백그라운드로 미룸
             try:
                 is_ontime = check_in_engine.is_within_deadline(now)
                 local_path = await download_image(image_url)
@@ -339,10 +321,23 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     old_acc = parse_duration_to_min(old_acc_str)
                     
                     # 2. 누적시간 오차 검사
+                    # [재인증 보정 로직] 이미 오늘 인증을 해서 Member_Master의 '최종누적'이 오늘치(duration)를 포함해버린 경우, 
+                    # 다시 인증하면 (old_acc + duration)이 실제 total_mnts보다 duration만큼 커져서 조작으로 오탐지됩니다.
+                    # 이를 방지하기 위해 오늘 이미 인증한 내역이 있는지 확인하여 old_acc에서 이전 인증 시간을 빼줍니다.
+                    today_auth = sheets_client.get_today_auth_history(target_date, nickname)
+                    if today_auth:
+                        prev_duration = today_auth.get("prev_duration", 0)
+                        prev_status = today_auth.get("prev_status", "")
+                        # 이전 기록이 허위/조작이 아니었다면 (즉, 최종누적이 업데이트된 기록이라면) 그만큼 빼서 "오늘 첫 인증 직전의 누적"으로 되돌림
+                        if prev_duration > 0 and "허위" not in prev_status and "조작" not in prev_status:
+                            old_acc = max(0, old_acc - prev_duration)
+                            print(f"🔄 [재인증 보정] {nickname}님의 오늘 이전 인증시간({prev_duration}분)을 제외하고 검증합니다. 보정된 기준누적: {old_acc}")
+
                     if total_mnts > 0 and old_acc > 0:
                         diff = abs((old_acc + duration) - total_mnts)
                         if diff > 60:
                             is_fake_time = True
+                            print(f"🚨 [조작 감지] 닉네임: {nickname}, 계산된오차: {diff}분 (DB기준누적:{old_acc} + 당일:{duration} != OCR총누적:{total_mnts})")
                             
                     # 벌금 계산
                     penalty = settlement_engine.calculate_penalty(

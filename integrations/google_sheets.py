@@ -155,6 +155,38 @@ class GoogleSheetsClient:
             print(f"Error fetching daily penalty: {e}")
             return 0
 
+    def get_today_auth_history(self, target_date: str, nickname: str) -> dict:
+        """오늘 이미 인증한 내역이 있는지 조회 (재인증 판별용)"""
+        if self.is_mock:
+            return {}
+        try:
+            worksheet = self.spreadsheet.worksheet("Daily_Log")
+            records = worksheet.get_all_records()
+            for row in records:
+                if str(row.get("날짜", "")) == target_date and str(row.get("닉네임", "")) == nickname:
+                    # 기존 인증 시간 파싱 (예: "1시간 32분" -> 92분)
+                    dur_str = str(row.get("당일시간", ""))
+                    prev_duration = 0
+                    if "시간" in dur_str or "분" in dur_str:
+                        h = 0
+                        m = 0
+                        if "시간" in dur_str:
+                            h_str = dur_str.split("시간")[0].strip()
+                            h = int(h_str) if h_str.isdigit() else 0
+                        if "분" in dur_str:
+                            m_str = dur_str.split("시간")[-1].replace("분", "").strip()
+                            m = int(m_str) if m_str.isdigit() else 0
+                        prev_duration = h * 60 + m
+                        
+                    return {
+                        "prev_duration": prev_duration,
+                        "prev_status": str(row.get("판정", ""))
+                    }
+            return {}
+        except Exception as e:
+            print(f"Error fetching today auth history: {e}")
+            return {}
+
     def setup_initial_data(self):
         """실제 구글 시트가 비어있을 경우 헤더와 초기 데이터를 최신 아키텍처 기준으로 주입합니다."""
         if self.is_mock or not self.spreadsheet:
