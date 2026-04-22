@@ -6,12 +6,31 @@ import httpx
 import tempfile
 import os
 import json
+import re
 
 from integrations.google_sheets import sheets_client
 from integrations.google_drive import drive_client
 from services.ocr_service import ocr_service
 from services.settlement_engine import settlement_engine
 from services.check_in_engine import check_in_engine
+
+def parse_duration_to_min(dur_str: str) -> int:
+    dur_str = str(dur_str).strip().replace(",", "")
+    if not dur_str or dur_str == "-" or dur_str == "0":
+        return 0
+    m_h = re.search(r'(\d+)\s*시간', dur_str)
+    m_m = re.search(r'(\d+)\s*분', dur_str)
+    h = int(m_h.group(1)) if m_h else 0
+    m = int(m_m.group(1)) if m_m else 0
+    res = h * 60 + m
+    if res == 0:
+        nums = re.findall(r'\d+', dur_str)
+        if nums:
+            res = int(nums[0])
+    return res
+
+def format_min_to_str(total_min: int) -> str:
+    return f"{total_min // 60}시간 {total_min % 60}분"
 
 router = APIRouter(prefix="/webhook", tags=["Webhook"])
 
@@ -95,8 +114,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             )
         
         # 그 외의 짧은 텍스트는 닉네임으로 간주하여 즉시 등록
-        target_nick = utterance
-        new_row = [target_nick, userkey, "활동", "120", "0", "1.0", "1", "10000", "-"]
+        target_nick = utterance.strip()
+        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-"]
         sheets_client.append_row("Member_Master", new_row)
         
         return build_kakao_response(
@@ -109,16 +128,18 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     row_idx = member_record.get("_row_index", -1)
 
     # [신규 기능 2: 목표 시간 변경] "목표변경 3시간" 또는 버튼 클릭
-    if utterance.startswith("목표변경") or "목표 변경" in utterance:
-        import re
+    if any(k in utterance.replace(" ", "") for k in ["목표변경", "목표시간변경", "목표시간설정"]) or utterance.startswith("목표시간") or utterance == "목표 변경":
         nums = re.findall(r'\d+', utterance)
         if not nums:
-            return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 3시간\n👉 목표변경 120\n👉 목표변경 2시간 30분")
+            return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 2시간 30분\n👉 목표시간 100\n👉 목표변경 3시간")
             
-        new_target_minutes = int(nums[0]) * 60 if "시간" in utterance else int(nums[0])
+        new_target_minutes = parse_duration_to_min(utterance)
+        if new_target_minutes < 120:
+            return build_kakao_response("❌ 목표시간은 최소 2시간(120분) 이상부터 입력 가능합니다.")
+            
         # 목표시간은 D열(4)
-        sheets_client.update_cell("Member_Master", row_idx, 4, str(new_target_minutes))
-        return build_kakao_response(f"✅ 목표 시간이 '{new_target_minutes//60}시간 {new_target_minutes%60}분'으로 변경 적용되었습니다!")
+        sheets_client.update_cell("Member_Master", row_idx, 4, format_min_to_str(new_target_minutes))
+        return build_kakao_response(f"✅ 목표 시간이 '{format_min_to_str(new_target_minutes)}'으로 변경 적용되었습니다!")
 
     now = datetime.now()
     target_date = check_in_engine.get_target_date(now)
@@ -135,7 +156,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     # 💡 [블랙아웃 체크 (낮 12:00 ~ 16:59 차단)]
     # 현황 조회를 제외한 모든 인증/신청/처리는 거부
     if check_in_engine.is_blackout_time(now) and not is_status:
-        return build_kakao_response("❌ 처리 기간이 지났습니다.\n(당일 인증 및 휴가 처리는 17:00 부터 접수를 받습니다.)")
+        return build_kakao_response("❌ 처리 기간이 지났습니다.\n(제출 마감: 익일 02:00, 인증 오픈: 당일 17:00)")
 
     # 💡 [휴무일(자율참여) 우선 차단]
     admin_events = sheets_client.get_sheet_records("Admin_Config")
@@ -264,12 +285,9 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     reply_text = "❌ OCR 엔진이 시간 정보를 찾지 못했습니다. 숫자가 선명하게 나오도록 자르지 말고 다시 찍어주세요!"
                 else:
                     bt_str = str(member_record.get("목표시간", "120")).strip()
-                    import re
-                    nums = re.findall(r'\d+', bt_str)
-                    if not nums:
+                    base_target = parse_duration_to_min(bt_str)
+                    if base_target == 0:
                         base_target = 120
-                    else:
-                        base_target = int(nums[0]) * 60 if "시간" in bt_str else int(nums[0])
                     final_target = target_override * 60 if target_override else base_target
                     
                     # --- [신규 로직] 시간 위조 및 지각 검증 ---
@@ -288,8 +306,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     if clean_nick not in full_text.replace(" ", ""):
                         is_fake_nickname = True
                         
-                    old_acc_str = str(member_record.get("최종누적", "0")).replace(",", "")
-                    old_acc = int(old_acc_str) if old_acc_str.isdigit() else 0
+                    old_acc_str = str(member_record.get("최종누적", "0"))
+                    old_acc = parse_duration_to_min(old_acc_str)
                     
                     # 2. 누적시간 오차 검사
                     # 만약 old_acc 가 0 이라면 가입 후 첫 인증이거나 누적 초기화 상태이므로 예외 패스 처리
@@ -345,7 +363,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     
                     # 누적 시간 갱신 (정상 PASS일 때만, 혹은 fake가 아닐 때. 5는 E열)
                     if not is_fake_date and not is_fake_time and not is_fake_nickname and total_mnts > 0:
-                        sheets_client.update_cell("Member_Master", row_idx, 5, str(total_mnts)) 
+                        sheets_client.update_cell("Member_Master", row_idx, 5, format_min_to_str(total_mnts)) 
                     
                     reply_text = (
                         f"✅ [{auth_type}] 인증 제출이 완료되었습니다!\n\n"

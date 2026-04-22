@@ -32,8 +32,8 @@ class CheckInEngine:
         if current_dt is None:
             current_dt = datetime.now()
         
-        # 12시부터 16:59까지 블랙아웃
-        if 12 <= current_dt.hour < 17:
+        # 02시부터 16:59까지 블랙아웃 (제출 마감은 02시)
+        if 2 <= current_dt.hour < 17:
             return True
         return False
 
