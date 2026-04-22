@@ -128,10 +128,11 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     row_idx = member_record.get("_row_index", -1)
 
     # [신규 기능 2: 목표 시간 변경] "목표변경 3시간" 또는 버튼 클릭
-    if any(k in utterance.replace(" ", "") for k in ["목표변경", "목표시간변경", "목표시간설정"]) or utterance.startswith("목표시간") or utterance == "목표 변경":
+    utterance_clean = utterance.replace(" ", "")
+    if utterance_clean.startswith("목표변경") or utterance_clean.startswith("목표시간") or utterance_clean.startswith("목표설정") or utterance == "목표 변경":
         nums = re.findall(r'\d+', utterance)
         if not nums:
-            return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 2시간 30분\n👉 목표시간 100\n👉 목표변경 3시간")
+            return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 2시간 30분\n👉 목표시간 120\n👉 목표변경 3시간")
             
         new_target_minutes = parse_duration_to_min(utterance)
         if new_target_minutes < 120:
