@@ -50,7 +50,7 @@ class OCRService:
             texts = response.text_annotations
             
             if not texts:
-                return None, 0, 0
+                return None, 0, 0, ""
                 
             full_text = texts[0].description
             

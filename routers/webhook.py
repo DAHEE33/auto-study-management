@@ -66,6 +66,17 @@ async def download_image(url: str) -> str:
     temp_file.close()
     return temp_file.name
 
+def update_sheets_in_background(row_idx: int, col_updates: list, log_row: list):
+    """구글 시트 업데이트를 백그라운드에서 실행하여 카카오 응답 지연(5초 타임아웃) 방지"""
+    try:
+        from integrations.google_sheets import sheets_client
+        for col_idx, val in col_updates:
+            sheets_client.update_cell("Member_Master", row_idx, col_idx, val)
+        sheets_client.upsert_daily_log(log_row)
+        print("✅ [백그라운드] 구글 시트 업데이트 완료!")
+    except Exception as e:
+        print(f"❌ [백그라운드] 구글 시트 업데이트 중 에러 발생: {e}")
+
 @router.post("")
 async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     """카카오톡 채널 챗봇(오픈빌더)으로부터 들어오는 요청을 처리합니다."""
@@ -120,7 +131,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         
         return build_kakao_response(
             f"✅ '{target_nick}'님, 가입이 완료되었습니다!\n"
-            f"(🎁 기본 혜택: 주휴 1회, 월휴 1회, 예치금 10,000원)\n\n"
+            f"(기본 혜택: 주휴 1회, 월휴 1회)\n\n"
+
             f"하단의 메뉴 버튼을 이용해 인증을 시작해 보세요."
         )
         
@@ -252,7 +264,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             if is_half_off:
                 # 반휴 누르고 아직 사진 안 보냈으므로 상태 기억!
                 user_states[userkey] = {"type": "반휴", "expires": now + timedelta(minutes=10)}
-                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요. (이제 текст 없이 사진만 보내도 됩니다!)"
+                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요. (이제 텍스트 없이 사진만 보내도 됩니다!)"
             else:
                 reply_text = "🔥 타이머와 누적시간이 잘 보이는 [구루미 메인 화면] 캡처 사진을 전송해 주셔야 공부 판독이 가능합니다."
         else:
@@ -268,11 +280,28 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 target_override = 1 # 반휴는 목표 1시간으로 고정
                 pending_deduct_amt = deduct_amt # 검증 통과 시 차감하기 위해 보류
 
-            # 이미지 파싱 프로세스 (추후 5초 타임아웃 회피를 위해 큐 혹은 콜백 설계 고려)
+            # --- [신규 로직: 5초 타임아웃 회피를 위한 카카오 콜백 처리] ---
+            callback_url = user_request.get("callbackUrl")
+            
+            if callback_url:
+                # 콜백 URL이 활성화된 경우 백그라운드로 넘기고 즉시 useCallback 응답
+                background_tasks.add_task(
+                    process_image_check_in_background,
+                    image_url=image_url,
+                    auth_type=auth_type,
+                    nickname=nickname,
+                    target_date=target_date,
+                    row_idx=row_idx,
+                    member_record=member_record,
+                    target_override=target_override,
+                    pending_deduct_amt=pending_deduct_amt if auth_type == "반휴" else 0,
+                    callback_url=callback_url
+                )
+                return {"version": "2.0", "useCallback": True}
+            
+            # 콜백이 비활성화된 경우 기존처럼 동기 처리 (5초 초과 시 카카오 응답 씹힘 발생 가능)
             try:
-                # deadline 위반 여부 판별 (01시 이후 ~ 05시 이전 전송 시 지각)
                 is_ontime = check_in_engine.is_within_deadline(now)
-                
                 local_path = await download_image(image_url)
                 drive_url = image_url # 카카오 사진 원본 링크 직접 사용 (구글 드라이브 업로드 생략)
                 
@@ -300,18 +329,16 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     is_fake_time = False
                     is_fake_nickname = False
                     
-                    # 1. 닉네임 일치 검사
-                    # 닉네임에서 공백을 제거한 기준으로도 검색 (오인식 대비)
+                    # 1. 닉네임 일치 검사 (단순 로깅용으로만 사용, 오인식으로 인한 억울한 패널티 방지)
                     clean_nick = nickname.replace(" ", "")
-                    # OCR 텍스트 내에서 본인 닉네임이 발견 안 되면 타인 사진 도용으로 간주
                     if clean_nick not in full_text.replace(" ", ""):
-                        is_fake_nickname = True
+                        print(f"⚠️ [주의] 닉네임 불일치 감지: DB={clean_nick}, OCR텍스트에 없음")
+                        # is_fake_nickname = True # 오인식으로 인한 -5000원 방지를 위해 비활성화
                         
                     old_acc_str = str(member_record.get("최종누적", "0"))
                     old_acc = parse_duration_to_min(old_acc_str)
                     
                     # 2. 누적시간 오차 검사
-                    # 만약 old_acc 가 0 이라면 가입 후 첫 인증이거나 누적 초기화 상태이므로 예외 패스 처리
                     if total_mnts > 0 and old_acc > 0:
                         diff = abs((old_acc + duration) - total_mnts)
                         if diff > 60:
@@ -322,7 +349,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         target_minutes=final_target, 
                         auth_minutes=duration, 
                         is_late_submit=not is_ontime, 
-                        is_fake_time=is_fake_time or is_fake_nickname, # 닉네임 불일치도 조작(-5000)으로 동일 처리
+                        is_fake_time=is_fake_time,
                         is_fake_date=is_fake_date,
                         is_absent=is_absent
                     )
@@ -334,37 +361,35 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         status_msg = "결석(목표미달)"
                     elif is_fake_date:
                         status_msg = "허위(예전사진)" 
-                    elif is_fake_nickname:
-                        status_msg = "조작(타인사진)"
                     elif is_fake_time:
                         status_msg = "조작(누적오류)"
                     else:
                         status_msg = "PASS" if penalty == 0 else "경고/지각발송"
                         
-                    # --- [신규 로직] 반휴 차감 적용 (시간 미달/조작이 아닐 때만) ---
-                    if auth_type == "반휴" and not is_failed and not is_fake_date and not is_fake_time and not is_fake_nickname:
+                    # --- [백그라운드 처리용 변수 수집] 구글 API 호출(약 3초)을 뒤로 미뤄서 타임아웃 회피 ---
+                    col_updates = []
+                    
+                    if auth_type == "반휴" and not is_failed and not is_fake_date and not is_fake_time:
                         col_idx = 6 # 주간휴무 컬럼
                         new_val = max(0.0, float(member_record.get("주간휴무", "0")) - pending_deduct_amt)
-                        sheets_client.update_cell("Member_Master", row_idx, col_idx, str(new_val))
+                        col_updates.append((col_idx, str(new_val)))
                         
-                    # --- [신규 로직] 예치금 즉시 차감 ---
                     if penalty < 0:
                         old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
                         old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
                         new_deposit = old_deposit + penalty # penalty는 -500 등 음수값
-                        sheets_client.update_cell("Member_Master", row_idx, 8, str(new_deposit)) # H열(8)이 예치금
+                        col_updates.append((8, str(new_deposit))) # H열(8)이 예치금
                     
                     # 당일시간(종류), 사진누적(분->시간)
                     dur_str = f"{duration//60}시간 {duration%60}분"
                     tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
-                    
-                    # DB 로그 (Daily_Log: 날짜, 닉네임, 종류, 판정, 승인여부, 당일시간, 사진누적, 벌금액, 증빙) - Override 처리
                     log_row = [target_date, nickname, auth_type, status_msg, "-", dur_str, tot_str, str(penalty), drive_url]
-                    sheets_client.upsert_daily_log(log_row)
                     
-                    # 누적 시간 갱신 (정상 PASS일 때만, 혹은 fake가 아닐 때. 5는 E열)
-                    if not is_fake_date and not is_fake_time and not is_fake_nickname and total_mnts > 0:
-                        sheets_client.update_cell("Member_Master", row_idx, 5, format_min_to_str(total_mnts)) 
+                    if not is_fake_date and not is_fake_time and total_mnts > 0:
+                        col_updates.append((5, format_min_to_str(total_mnts)))
+                        
+                    # 🚀 백그라운드로 구글 시트 업데이트 넘김 (응답 시간 대폭 단축!)
+                    background_tasks.add_task(update_sheets_in_background, row_idx, col_updates, log_row)
                     
                     reply_text = (
                         f"✅ [{auth_type}] 인증 제출이 완료되었습니다!\n\n"
@@ -373,11 +398,12 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         f"- 당일 공부시간: {dur_str}\n"
                         f"- 누적 공부시간: {tot_str}\n"
                         f"- 사진 인식시점: {end_time}\n"
-                        f"- 감지된 닉네임 매칭: {'실패 (타인사진의심)' if is_fake_nickname else '성공'}\n"
                         f"- 이번 인증 벌금: {penalty}원"
                     )
 
             except Exception as e:
                 reply_text = f"서버 처리 중 오류가 발생했습니다: {e}"
+                print(f"⚠️ Exception 됨: {e}")
 
+    print(f"📨 [카카오 응답 전송]: {reply_text[:100]}...")
     return build_kakao_response(reply_text)
