@@ -139,20 +139,46 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     nickname = member_record.get("닉네임", "Unkown")
     row_idx = member_record.get("_row_index", -1)
 
-    # [신규 기능 2: 목표 시간 변경] "목표변경 3시간" 또는 버튼 클릭
+    # [목표 시간 변경] "목표변경 3시간" 또는 버튼 클릭
     utterance_clean = utterance.replace(" ", "")
-    if utterance_clean.startswith("목표변경") or utterance_clean.startswith("목표시간") or utterance_clean.startswith("목표설정") or utterance == "목표 변경":
+    
+    # --- [State 조회] 이전 버튼 클릭 상태 확인 ---
+    state = user_states.get(userkey)
+    is_state_valid = state and state["expires"] > datetime.now()
+    
+    # --- [목표변경 상태 처리] 이전에 "목표 변경" 버튼을 누른 상태에서 숫자만 입력한 경우 ---
+    if is_state_valid and state["type"] == "목표변경" and not image_url:
+        # "목표변경" 상태에서 들어온 텍스트를 시간값으로 처리
+        del user_states[userkey]
+        new_target_minutes = parse_duration_to_min(utterance)
+        # 순수 숫자만 입력한 경우 (예: "100" → 100분)
+        if new_target_minutes == 0:
+            nums = re.findall(r'\d+', utterance)
+            if nums:
+                new_target_minutes = int(nums[0])
+        if new_target_minutes < 120:
+            return build_kakao_response("❌ 목표시간은 최소 2시간(120분) 이상부터 입력 가능합니다.")
+        sheets_client.update_cell("Member_Master", row_idx, 4, format_min_to_str(new_target_minutes))
+        return build_kakao_response(f"✅ 목표 시간이 '{format_min_to_str(new_target_minutes)}'으로 변경 적용되었습니다!")
+    
+    # --- [목표변경 직접 입력] "목표변경 3시간" 처럼 값을 함께 보낸 경우 ---
+    if utterance_clean.startswith("목표변경") or utterance_clean.startswith("목표시간") or utterance_clean.startswith("목표설정"):
         nums = re.findall(r'\d+', utterance)
         if not nums:
+            user_states[userkey] = {"type": "목표변경", "expires": datetime.now() + timedelta(minutes=5)}
             return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 2시간 30분\n👉 목표시간 120\n👉 목표변경 3시간")
             
         new_target_minutes = parse_duration_to_min(utterance)
         if new_target_minutes < 120:
             return build_kakao_response("❌ 목표시간은 최소 2시간(120분) 이상부터 입력 가능합니다.")
             
-        # 목표시간은 D열(4)
         sheets_client.update_cell("Member_Master", row_idx, 4, format_min_to_str(new_target_minutes))
         return build_kakao_response(f"✅ 목표 시간이 '{format_min_to_str(new_target_minutes)}'으로 변경 적용되었습니다!")
+    
+    # --- ["목표 변경" 버튼 클릭 (숫자 없이)] ---
+    if utterance == "목표 변경":
+        user_states[userkey] = {"type": "목표변경", "expires": datetime.now() + timedelta(minutes=5)}
+        return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 2시간 30분\n👉 목표시간 120\n👉 목표변경 3시간")
 
     now = datetime.now()
     target_date = check_in_engine.get_target_date(now)
@@ -165,9 +191,15 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     is_month_off = "월휴" in utterance or "월휴" in block_name
     is_special_off = "특휴" in utterance or "특휴" in block_name
     is_status = "내 현황" in utterance or "현황" in block_name
+    is_auth = utterance == "인증"
+    
+    # --- [핵심] 명시적 버튼 클릭 시 이전 상태 무조건 초기화 ---
+    # 유저가 새로운 의도를 표명했으므로, 이전에 기억해둔 상태(반휴 대기, 특휴 대기 등)를 즉시 삭제합니다.
+    is_explicit_action = is_half_off or is_week_off or is_month_off or is_special_off or is_status or is_auth
+    if is_explicit_action and userkey in user_states:
+        del user_states[userkey]
 
-    # 💡 [블랙아웃 체크 (낮 12:00 ~ 16:59 차단)]
-    # 현황 조회를 제외한 모든 인증/신청/처리는 거부
+    # 💡 [블랙아웃 체크 (낮 02:00 ~ 16:59 차단)]
     if check_in_engine.is_blackout_time(now) and not is_status:
         return build_kakao_response("❌ 처리 기간이 지났습니다.\n(제출 마감: 익일 02:00, 인증 오픈: 당일 17:00)")
 
@@ -184,7 +216,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         return build_kakao_response("🏖️ 오늘은 [자율참여(휴무일)] 지정일입니다!\n\n거짓 인증, 휴가(반휴/주휴) 차감 등 일체의 스터디 인증이 필요하지 않습니다. 마음 편히 쉬시거나 자율적으로 공부해주세요! 🎉")
 
     # 💡 [State 조회 및 적용] 
-    # 사진만 보냈더라도, 10분 내에 누른 버튼(특휴/반휴)이 있다면 해당 상태로 강제 지정합니다.
+    # 사진만 보냈더라도, 10분 내에 누른 버튼(반휴/특휴)이 있다면 해당 상태로 강제 지정합니다.
+    # (위에서 명시적 버튼 클릭 시 이미 초기화했으므로, 여기서 적용되는 건 "사진만 보낸 경우"뿐)
     state = user_states.get(userkey)
     if state and state["expires"] > now:
         if state["type"] == "반휴":
@@ -216,6 +249,38 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     elif is_week_off or is_month_off:
         # [주휴 / 월휴] (버튼 클릭만으로 완료되는 로직)
         leave_type = "주휴" if is_week_off else "월휴"
+        
+        # --- [당일 전환 로직] 이미 오늘 반휴/일반 인증이 있었다면 이전 차감을 환불하고 전환 ---
+        today_auth = sheets_client.get_today_auth_history(target_date, nickname)
+        refund_msg = ""
+        if today_auth:
+            prev_status = today_auth.get("prev_status", "")
+            # 이전에 반휴로 인증했었다면 주간휴무 0.5를 환불
+            prev_type = ""
+            daily_logs = sheets_client.get_sheet_records("Daily_Log")
+            for log in daily_logs:
+                if str(log.get("날짜", "")) == target_date and str(log.get("닉네임", "")) == nickname:
+                    prev_type = str(log.get("유형", ""))
+                    break
+            
+            if prev_type == "반휴":
+                # 반휴 차감분(0.5) 환불
+                old_weekly = float(str(member_record.get("주간휴무", "0")))
+                sheets_client.update_cell("Member_Master", row_idx, 6, str(old_weekly + 0.5))
+                # member_record의 값도 갱신 (이후 검증에 영향)
+                member_record["주간휴무"] = str(old_weekly + 0.5)
+                refund_msg = "\n(이전 반휴 차감분 0.5가 환불된 후 전환되었습니다.)"
+                print(f"🔄 [{nickname}] 반휴→{leave_type} 전환: 주간휴무 0.5 환불 ({old_weekly} → {old_weekly + 0.5})")
+            
+            # 이전 벌금이 있었다면 환불
+            old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
+            if old_penalty < 0:
+                old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+                old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
+                new_deposit = old_deposit + abs(old_penalty)
+                sheets_client.update_cell("Member_Master", row_idx, 8, str(new_deposit))
+                refund_msg += f"\n(기존 패널티 {old_penalty}원이 예치금으로 반환되었습니다.)"
+        
         is_approved, msg, deduct_amt = check_in_engine.process_leave_request(member_record, leave_type)
         
         if is_approved:
@@ -226,18 +291,10 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             # DB 잔여량 차감 반영
             sheets_client.update_cell("Member_Master", row_idx, col_idx, new_val)
             
-            # --- [신규 로직] 만약 오늘 이미 결석/지각 등으로 벌금이 차감되어 있었다면 환불 ---
-            old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
-            if old_penalty < 0:
-                old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
-                old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
-                new_deposit = old_deposit + abs(old_penalty) # 차감된 벌금만큼 100% 다시 더해줌
-                sheets_client.update_cell("Member_Master", row_idx, 8, str(new_deposit)) # H열(8)
-                msg += f"\n(기존 무효 처리: 부과되었던 패널티 {old_penalty}원이 예치금으로 반환되었습니다.)"
-            
             # 로그 반영 (당일 기록 Override 적용)
             log_row = [target_date, nickname, leave_type, "PASS", "-", "0", "-", "0", "-"]
             sheets_client.upsert_daily_log(log_row)
+            msg += refund_msg
             
         reply_text = msg
 
@@ -264,7 +321,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             if is_half_off:
                 # 반휴 누르고 아직 사진 안 보냈으므로 상태 기억!
                 user_states[userkey] = {"type": "반휴", "expires": now + timedelta(minutes=10)}
-                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요."
+                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요. (이제 텍스트 없이 사진만 보내도 됩니다!)"
             else:
                 reply_text = "🔥 타이머와 누적시간이 잘 보이는 [구루미 메인 화면] 캡처 사진을 전송해 주셔야 공부 판독이 가능합니다."
         else:
@@ -272,8 +329,37 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             target_override = None
             pending_deduct_amt = 0
             
-            # 반휴일 경우 우선 잔여휴무 검증
+            # 반휴일 경우 우선 잔여휴무 검증 + 당일 전환 처리
             if auth_type == "반휴":
+                # --- [당일 전환 로직] 이미 오늘 주휴/일반으로 인증했다면 이전 차감 환불 ---
+                today_auth = sheets_client.get_today_auth_history(target_date, nickname)
+                if today_auth:
+                    prev_type = ""
+                    daily_logs_check = sheets_client.get_sheet_records("Daily_Log")
+                    for log in daily_logs_check:
+                        if str(log.get("날짜", "")) == target_date and str(log.get("닉네임", "")) == nickname:
+                            prev_type = str(log.get("유형", ""))
+                            break
+                    if prev_type == "주휴":
+                        # 주휴 차감분(1.0) 환불
+                        old_weekly = float(str(member_record.get("주간휴무", "0")))
+                        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_weekly + 1.0))
+                        member_record["주간휴무"] = str(old_weekly + 1.0)
+                        print(f"🔄 [{nickname}] 주휴→반휴 전환: 주간휴무 1.0 환불 ({old_weekly} → {old_weekly + 1.0})")
+                    elif prev_type == "반휴":
+                        # 이전 반휴 차감분(0.5) 환불 (재인증)
+                        old_weekly = float(str(member_record.get("주간휴무", "0")))
+                        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_weekly + 0.5))
+                        member_record["주간휴무"] = str(old_weekly + 0.5)
+                        print(f"🔄 [{nickname}] 반휴 재인증: 주간휴무 0.5 환불 ({old_weekly} → {old_weekly + 0.5})")
+                    # 이전 벌금 환불
+                    old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
+                    if old_penalty < 0:
+                        old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+                        old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
+                        sheets_client.update_cell("Member_Master", row_idx, 8, str(old_deposit + abs(old_penalty)))
+                        member_record["예치금"] = str(old_deposit + abs(old_penalty))
+                
                 is_approved, msg, deduct_amt = check_in_engine.process_leave_request(member_record, "반휴")
                 if not is_approved:
                     return build_kakao_response(msg)
