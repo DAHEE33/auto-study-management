@@ -28,6 +28,7 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
     logs = sheets_client.get_sheet_records("Daily_Log")
     
     active_members = [m for m in members if str(m.get("상태", "")) == "활동"]
+    ordered_nicks = [str(m.get("닉네임", "")).strip() for m in active_members if str(m.get("닉네임", "")).strip()]
     
     # 시간 추출 헬퍼 (예: 1시간 30분 -> 90 반환)
     def parse_duration_to_min(dur_str):
@@ -129,7 +130,7 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
     # 4. 매트릭스 피벗
     matrix = {}
     for d in date_strs:
-        matrix[d] = {n: {"status": "-", "type": "-", "penalty": 0, "dur_str": "", "tooltip": "기록 없음"} for n in ranked_nicks}
+        matrix[d] = {n: {"status": "-", "type": "-", "penalty": 0, "dur_str": "", "tooltip": "기록 없음"} for n in ordered_nicks}
         
     for log in logs:
         d = str(log.get("날짜", ""))
@@ -173,7 +174,7 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
             "leaderboard": leaderboard,
             "date_strs": date_strs,
             "display_dates": display_dates,
-            "nicknames": ranked_nicks,
+            "nicknames": ordered_nicks,
             "matrix": matrix,
             "is_weekly": is_weekly,
         }

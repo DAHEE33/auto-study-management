@@ -211,17 +211,17 @@
         }
 
         table {
-            width: 100%;
+            width: max-content;
             border-collapse: separate;
-            border-spacing: 0 8px;
+            border-spacing: 0 6px;
             text-align: center;
-            min-width: 800px; /* 20명 이상일때 밀리지 않도록 고정 최소 너비 추가 */
+            min-width: 0;
         }
         
         th {
             color: var(--text-secondary);
             font-weight: 500;
-            padding: 10px;
+            padding: 8px 10px;
             font-size: 0.9rem;
             border-bottom: 1px solid rgba(255,255,255,0.05);
             white-space: nowrap;
@@ -247,7 +247,12 @@
         }
 
         td {
-            padding: 8px;
+            padding: 6px 8px;
+        }
+
+        th:not(:first-child),
+        td:not(:first-child) {
+            min-width: 72px;
         }
 
         /* Badges */
