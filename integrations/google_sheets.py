@@ -19,10 +19,10 @@ class GoogleSheetsClient:
         # 최신 설계 기준 모의 데이터
         self.mock_data = {
             "Member_Master": [
-                {"닉네임": "dev_user", "UserKey": "UK123", "상태": "활동", "목표시간": "120", "최종누적": "15600", "주간휴무": "1.0", "남은월휴": "1", "예치금": "10000", "비고": "-"},
+                {"닉네임": "dev_user", "UserKey": "UK123", "상태": "활동", "목표시간": "120", "최종누적": "15600", "주간휴무": "1.0", "남은월휴": "1", "예치금": "10000", "비고": "-", "남은특휴": "1"},
             ],
             "Daily_Log": [],
-            "Admin_Config": []
+            "Admin_Config": [{"날짜": "2026-05-01", "이벤트 타입": "특휴개수", "목표시간 조정": "0", "주간 공지사항 (추가 멘트)": "-", "월별특휴개수": "3"}]
         }
 
         try:
@@ -202,10 +202,22 @@ class GoogleSheetsClient:
             val1 = ws_member.get("A1")
             if not val1 or not val1[0]:
                 ws_member.update("A1", [
-                    ["닉네임", "UserKey", "상태", "목표시간", "최종누적", "주간휴무", "남은월휴", "예치금", "비고"],
-                    ["dev_user", "UK123", "활동", "120", "15,600", "1.0", "1", "10,000", "-"]
+                    ["닉네임", "UserKey", "상태", "목표시간", "최종누적", "주간휴무", "남은월휴", "예치금", "비고", "남은특휴"],
+                    ["dev_user", "UK123", "활동", "120", "15,600", "1.0", "1", "10,000", "-", "1"]
                 ])
                 print("✔️ 'Member_Master' 시트에 기초 데이터 삽입 완료")
+            else:
+                member_headers = ws_member.row_values(1)
+                if "남은특휴" not in member_headers:
+                    ws_member.add_cols(1)
+                    member_headers.append("남은특휴")
+                    ws_member.update("A1:J1", [member_headers])
+                    records = ws_member.get_all_records()
+                    for idx, row in enumerate(records, start=2):
+                        current_val = str(row.get("남은특휴", "")).strip()
+                        if not current_val:
+                            ws_member.update_cell(idx, 10, "1")
+                    print("✔️ 'Member_Master' 시트에 '남은특휴' 컬럼 추가 완료")
 
             # 2. Daily_Log 세팅
             try:
@@ -230,10 +242,23 @@ class GoogleSheetsClient:
             val3 = ws_admin.get("A1")
             if not val3 or not val3[0]:
                 ws_admin.update("A1", [
-                    ["날짜", "이벤트 타입", "목표시간 조정", "주간 공지사항 (추가 멘트)"],
-                    ["2026-05-05", "자율참여", "0", "어린이날 즐겁게 보내세요!"]
+                    ["날짜", "이벤트 타입", "목표시간 조정", "주간 공지사항 (추가 멘트)", "월별특휴개수"],
+                    ["2026-05-05", "자율참여", "0", "어린이날 즐겁게 보내세요!", "-"],
+                    ["2026-05-01", "특휴개수", "0", "-", "3"]
                 ])
                 print("✔️ 'Admin_Config' 시트에 기초 데이터 삽입 완료")
+            else:
+                admin_headers = ws_admin.row_values(1)
+                if "월별특휴개수" not in admin_headers:
+                    ws_admin.add_cols(1)
+                    admin_headers.append("월별특휴개수")
+                    ws_admin.update("A1:E1", [admin_headers])
+                    records = ws_admin.get_all_records()
+                    for idx, row in enumerate(records, start=2):
+                        current_val = str(row.get("월별특휴개수", "")).strip()
+                        if not current_val:
+                            ws_admin.update_cell(idx, 5, "-")
+                    print("✔️ 'Admin_Config' 시트에 '월별특휴개수' 컬럼 추가 완료")
                 
         except Exception as e:
             print(f"Error setting up initial data: {e}")

@@ -145,7 +145,7 @@
         .layout-grid {
             display: grid;
             grid-template-columns: 3fr 1fr;
-            gap: 30px;
+            gap: 18px;
         }
 
         @media (max-width: 900px) {
@@ -191,7 +191,7 @@
             backdrop-filter: blur(16px);
             border: 1px solid var(--glass-border);
             border-radius: 24px;
-            padding: 25px;
+            padding: 20px;
             overflow-x: auto;
             /* 스크롤바 디자인 (웹킷 계열) */
             scrollbar-width: thin;
@@ -326,12 +326,12 @@
             backdrop-filter: blur(16px);
             border: 1px solid var(--glass-border);
             border-radius: 24px;
-            padding: 25px;
+            padding: 20px;
         }
         .lb-item {
             display: flex;
             align-items: center;
-            padding: 15px 0;
+            padding: 12px 0;
             border-bottom: 1px dashed rgba(255,255,255,0.05);
         }
         .lb-item:last-child {
@@ -357,13 +357,11 @@
 <body>
 
 <div class="container">
-    
-    <!-- TABS -->
     <div class="tabs">
         <a href="/dashboard?user={{ my_stats.nickname }}&view=weekly" class="tab-btn {% if is_weekly %}active{% endif %}">주간 현황</a>
         <a href="/dashboard?user={{ my_stats.nickname }}&view=monthly" class="tab-btn {% if not is_weekly %}active{% endif %}">월간 현황</a>
     </div>
-    
+
     {% if not my_stats.is_valid %}
     <div class="error-card">
         <h3>해당 닉네임을 찾을 수 없습니다. ({{ my_stats.nickname }})</h3>
@@ -459,7 +457,7 @@
                 </div>
             </div>
             {% endfor %}
-            <p style="text-align:center; color:var(--text-secondary); font-size:0.8rem; margin-top:20px;">
+            <p style="text-align:center; color:var(--text-secondary); font-size:0.8rem; margin-top:14px;">
                 순위는 {% if is_weekly %}이번 주{% else %}이번 달{% endif %} 공부시간 기준입니다.
             </p>
         </div>

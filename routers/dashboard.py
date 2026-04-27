@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from integrations.google_sheets import sheets_client
 from datetime import datetime, timedelta
+from services.leave_reset_service import leave_reset_service
 import os
 
 router = APIRouter(prefix="/dashboard", tags=["Dashboard"])
@@ -15,8 +16,14 @@ templates = Jinja2Templates(directory=templates_dir)
 async def view_dashboard(request: Request, user: str = Query(None), view: str = Query("weekly")):
     """
     개인화된 스터디 현황과 순위, 그리고 그룹 전체 출석 매트릭스를 제공합니다.
+    개인화된 스터디 현황과 순위, 그리고 그룹 전체 출석 매트릭스를 제공합니다.
     view 파라미터가 'monthly' 이면 월간, 그 외에는 주간(weekly)으로 동작합니다.
     """
+    try:
+        leave_reset_service.run_if_needed()
+    except Exception as e:
+        print(f"⚠️ 휴무 자동 갱신 체크 실패(dashboard): {e}")
+
     members = sheets_client.get_sheet_records("Member_Master")
     logs = sheets_client.get_sheet_records("Daily_Log")
     
@@ -42,16 +49,14 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
     # 오늘 기준 주간/월간 날짜 범위 세팅
     today = datetime.now()
     if view == "monthly":
-        # 현재 달의 1일부터 말일까지 (간단히 1일부터 오늘까지 표출)
         first_day = today.replace(day=1)
         days_in_month = (today - first_day).days + 1
         date_objs = [first_day + timedelta(days=i) for i in range(days_in_month)]
     else:
-        # 이번 주 월요일 ~ 일요일 (0: 월요일, 6: 일요일)
         weekday = today.weekday()
         monday = today - timedelta(days=weekday)
-        date_objs = [monday + timedelta(days=i) for i in range(7)]
-        
+        date_objs = [monday + timedelta(days=i) for i in range(5)]
+
     date_strs = [d.strftime("%Y-%m-%d") for d in date_objs]
     display_dates = [d.strftime("%m/%d(%a)") for d in date_objs]
     
@@ -158,8 +163,7 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
                 "tooltip": tooltip
             }
 
-    # 현재 뷰 상태 파악
-    is_weekly = (view != "monthly")
+    is_weekly = view != "monthly"
 
     return templates.TemplateResponse(
         request=request,
@@ -171,6 +175,6 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
             "display_dates": display_dates,
             "nicknames": ranked_nicks,
             "matrix": matrix,
-            "is_weekly": is_weekly
+            "is_weekly": is_weekly,
         }
     )

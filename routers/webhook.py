@@ -13,6 +13,7 @@ from integrations.google_drive import drive_client
 from services.ocr_service import ocr_service
 from services.settlement_engine import settlement_engine
 from services.check_in_engine import check_in_engine
+from services.leave_reset_service import leave_reset_service
 
 def parse_duration_to_min(dur_str: str) -> int:
     dur_str = str(dur_str).strip().replace(",", "")
@@ -88,6 +89,11 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     
     # 1. UserKey 추출 및 멤버 확보
     userkey = user_request.get("user", {}).get("id", "")
+
+    try:
+        leave_reset_service.run_if_needed()
+    except Exception as e:
+        print(f"⚠️ 휴무 자동 갱신 체크 실패(webhook): {e}")
     
     # 📝 [로그 출력] 챗봇이 보낸 UserKey를 서버 터미널에서 즉시 확인합니다.
     print(f"\n================ [카카오 웹훅 수신] ================")
@@ -126,7 +132,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         
         # 그 외의 짧은 텍스트는 닉네임으로 간주하여 즉시 등록
         target_nick = utterance.strip()
-        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-"]
+        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "1"]
         sheets_client.append_row("Member_Master", new_row)
         
         return build_kakao_response(
