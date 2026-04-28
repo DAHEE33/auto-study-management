@@ -37,6 +37,28 @@ class CheckInEngine:
             return True
         return False
 
+    def is_action_allowed(self, action_type: str, current_dt: datetime = None) -> bool:
+        """
+        액션 종류별 허용 시간 여부를 반환합니다.
+
+        action_type:
+        - "status": 항상 허용
+        - "general_auth": 일반 인증/반휴 인증 (17:00 ~ 익일 02:00)
+        - "week_off": 주휴 처리 (17:00 ~ 익일 12:00)
+        - "special_off": 특휴 처리 (17:00 ~ 익일 12:00)
+        """
+        if current_dt is None:
+            current_dt = datetime.now()
+
+        if action_type == "status":
+            return True
+
+        hour = current_dt.hour
+        if action_type in ("week_off", "special_off"):
+            return hour >= 17 or hour < 12
+
+        return hour >= 17 or hour < 2
+
     def validate_ocr_time(self, target_date_str: str, end_time_str: str, auth_minutes: int, target_minutes: int) -> Tuple[bool, bool, bool]:
         """
         OCR로 추출된 종료 시간이 허가된 시간(당일 17:00 ~ 익일 02:00) 안에 안전하게 속하는지 검증합니다.

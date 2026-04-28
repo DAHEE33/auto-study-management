@@ -205,23 +205,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     if is_explicit_action and userkey in user_states:
         del user_states[userkey]
 
-    # 💡 [블랙아웃 체크 (낮 02:00 ~ 16:59 차단)]
-    if check_in_engine.is_blackout_time(now) and not is_status:
-        return build_kakao_response("❌ 처리 기간이 지났습니다.\n(제출 마감: 익일 02:00, 인증 오픈: 당일 17:00)")
-
-    # 💡 [휴무일(자율참여) 우선 차단]
-    admin_events = sheets_client.get_sheet_records("Admin_Config")
-    is_optional_day = False
-    for event in admin_events:
-        if str(event.get("날짜", "")).strip() == target_date:
-            if "자율참여" in str(event.get("이벤트 타입", "")):
-                is_optional_day = True
-                break
-                
-    if is_optional_day and not is_status:
-        return build_kakao_response("🏖️ 오늘은 [자율참여(휴무일)] 지정일입니다!\n\n거짓 인증, 휴가(반휴/주휴) 차감 등 일체의 스터디 인증이 필요하지 않습니다. 마음 편히 쉬시거나 자율적으로 공부해주세요! 🎉")
-
-    # 💡 [State 조회 및 적용] 
+    # 💡 [State 조회 및 적용]
     # 사진만 보냈더라도, 10분 내에 누른 버튼(반휴/특휴)이 있다면 해당 상태로 강제 지정합니다.
     # (위에서 명시적 버튼 클릭 시 이미 초기화했으므로, 여기서 적용되는 건 "사진만 보낸 경우"뿐)
     state = user_states.get(userkey)
@@ -234,6 +218,34 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         # 실제로 사진이 들어와서 인증 처리가 시작되면, 대기 상태를 소진(삭제)합니다.
         if image_url:
             del user_states[userkey]
+
+    # 💡 [액션별 허용 시간 체크]
+    if is_status:
+        action_type = "status"
+    elif is_week_off:
+        action_type = "week_off"
+    elif is_special_off:
+        action_type = "special_off"
+    else:
+        # 일반 인증/반휴 인증/월휴 처리
+        action_type = "general_auth"
+
+    if not check_in_engine.is_action_allowed(action_type, now):
+        if action_type in ("week_off", "special_off"):
+            return build_kakao_response("❌ 처리 가능 시간이 지났습니다.\n(주휴/특휴 마감: 익일 12:00, 오픈: 당일 17:00)")
+        return build_kakao_response("❌ 처리 기간이 지났습니다.\n(일반/반휴/월휴 마감: 익일 02:00, 오픈: 당일 17:00)")
+
+    # 💡 [휴무일(자율참여) 우선 차단]
+    admin_events = sheets_client.get_sheet_records("Admin_Config")
+    is_optional_day = False
+    for event in admin_events:
+        if str(event.get("날짜", "")).strip() == target_date:
+            if "자율참여" in str(event.get("이벤트 타입", "")):
+                is_optional_day = True
+                break
+                
+    if is_optional_day and not is_status:
+        return build_kakao_response("🏖️ 오늘은 [자율참여(휴무일)] 지정일입니다!\n\n거짓 인증, 휴가(반휴/주휴) 차감 등 일체의 스터디 인증이 필요하지 않습니다. 마음 편히 쉬시거나 자율적으로 공부해주세요! 🎉")
 
     reply_text = ""
 
