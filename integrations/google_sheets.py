@@ -3,6 +3,7 @@ from oauth2client.service_account import ServiceAccountCredentials
 from core.config import settings
 import re
 from typing import List, Dict, Optional
+import time
 
 class GoogleSheetsClient:
     def __init__(self):
@@ -15,6 +16,10 @@ class GoogleSheetsClient:
         self.client = None
         self.spreadsheet = None
         self.is_mock = False
+        
+        self._cache = {}
+        self._cache_time = {}
+        self.CACHE_TTL = 60  # 60초 캐싱 (카카오 5초 타임아웃 방어)
         
         # 최신 설계 기준 모의 데이터
         self.mock_data = {
@@ -48,14 +53,29 @@ class GoogleSheetsClient:
             print(f"⚠️ Failed to initialize Google Sheets client: {e}. Running in MOCK mode.")
             self.is_mock = True
 
+    def clear_cache(self, sheet_name: str = None):
+        if sheet_name:
+            self._cache.pop(sheet_name, None)
+            self._cache_time.pop(sheet_name, None)
+        else:
+            self._cache.clear()
+            self._cache_time.clear()
+
     def get_sheet_records(self, sheet_name: str) -> List[Dict]:
         """Fetch all records from a specific sheet as a list of dictionaries."""
         if self.is_mock:
             return self.mock_data.get(sheet_name, [])
             
+        now = time.time()
+        if sheet_name in self._cache and (now - self._cache_time.get(sheet_name, 0)) < self.CACHE_TTL:
+            return self._cache[sheet_name]
+            
         try:
             worksheet = self.spreadsheet.worksheet(sheet_name)
-            return worksheet.get_all_records()
+            records = worksheet.get_all_records()
+            self._cache[sheet_name] = records
+            self._cache_time[sheet_name] = now
+            return records
         except Exception as e:
             print(f"Error fetching sheet {sheet_name}: {e}")
             return []
@@ -71,6 +91,7 @@ class GoogleSheetsClient:
 
     def append_row(self, sheet_name: str, row_data: List):
         """Append a single row to a specific sheet."""
+        self.clear_cache(sheet_name)
         if self.is_mock:
             if sheet_name not in self.mock_data:
                 self.mock_data[sheet_name] = []
@@ -91,6 +112,7 @@ class GoogleSheetsClient:
         존재하지 않으면 맨 아래에 새 행을 추가(append)합니다.
         row_data: [Date, Nickname, Type, Result, Approval, DailyTime, TotalTime, Penalty, ImageID]
         """
+        self.clear_cache("Daily_Log")
         if self.is_mock:
             print(f"[MOCK] Upserted to Daily_Log: {row_data}")
             return True
@@ -125,6 +147,7 @@ class GoogleSheetsClient:
 
     def update_cell(self, sheet_name: str, row: int, col: int, val):
         """특정 셀 업데이트 (잔여 휴무 수량 차감 등에 사용)"""
+        self.clear_cache(sheet_name)
         if self.is_mock:
             print(f"[MOCK] Update {sheet_name} R{row}C{col} -> {val}")
             return True
