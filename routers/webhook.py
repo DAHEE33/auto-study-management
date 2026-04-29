@@ -7,6 +7,8 @@ import tempfile
 import os
 import json
 import re
+import traceback
+import uuid
 
 from integrations.google_sheets import sheets_client
 from integrations.google_drive import drive_client
@@ -38,6 +40,7 @@ router = APIRouter(prefix="/webhook", tags=["Webhook"])
 # 봇이 사용자 요청 맥락을 기억하기 위한 상태 저장소 (메모리 방식)
 # 형태: { "UserKey": {"type": "반휴" | "특휴", "expires": datetime_object} }
 user_states = {}
+RESERVED_NICK_INPUTS = {"인증", "반휴 인증", "주휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"}
 
 def build_kakao_response(text: str) -> Dict[str, Any]:
     """카카오 i 챗봇 스펙에 맞춘 심플한 텍스트 응답 제네레이터"""
@@ -67,16 +70,45 @@ async def download_image(url: str) -> str:
     temp_file.close()
     return temp_file.name
 
-def update_sheets_in_background(row_idx: int, col_updates: list, log_row: list):
+def get_nickname_validation_error(raw_nickname: str) -> str:
+    nickname = raw_nickname.strip()
+    if not nickname:
+        return "닉네임이 비어있습니다."
+    if nickname in RESERVED_NICK_INPUTS:
+        return "메뉴 버튼 문구는 닉네임으로 사용할 수 없습니다."
+    if nickname.startswith("http"):
+        return "링크는 닉네임으로 사용할 수 없습니다."
+    if len(nickname) > 15:
+        return "닉네임은 15자 이하로 입력해 주세요."
+    return ""
+
+def is_duplicate_nickname(userkey: str, nickname: str) -> bool:
+    records = sheets_client.get_sheet_records("Member_Master")
+    for row in records:
+        row_userkey = str(row.get("UserKey", "")).strip()
+        row_nickname = str(row.get("닉네임", "")).strip()
+        if row_userkey != userkey and row_nickname == nickname:
+            return True
+    return False
+
+def update_sheets_in_background(request_id: str, row_idx: int, col_updates: list, log_row: list):
     """구글 시트 업데이트를 백그라운드에서 실행하여 카카오 응답 지연(5초 타임아웃) 방지"""
     try:
         from integrations.google_sheets import sheets_client
+        print(f"[{request_id}] 🧾 [백그라운드] 시트 업데이트 시작 row={row_idx}, updates={len(col_updates)}")
         for col_idx, val in col_updates:
-            sheets_client.update_cell("Member_Master", row_idx, col_idx, val)
-        sheets_client.upsert_daily_log(log_row)
-        print("✅ [백그라운드] 구글 시트 업데이트 완료!")
+            ok = sheets_client.update_cell("Member_Master", row_idx, col_idx, val)
+            if not ok:
+                print(f"[{request_id}] ❌ [백그라운드] update_cell 실패 row={row_idx}, col={col_idx}, val={val}")
+
+        log_ok = sheets_client.upsert_daily_log(log_row)
+        if not log_ok:
+            print(f"[{request_id}] ❌ [백그라운드] upsert_daily_log 실패: {log_row}")
+        else:
+            print(f"[{request_id}] ✅ [백그라운드] 구글 시트 업데이트 완료")
     except Exception as e:
-        print(f"❌ [백그라운드] 구글 시트 업데이트 중 에러 발생: {e}")
+        print(f"[{request_id}] ❌ [백그라운드] 구글 시트 업데이트 중 에러 발생: {e}")
+        print(traceback.format_exc())
 
 @router.post("")
 async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -86,6 +118,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     utterance = user_request.get("utterance", "").strip()
     action = body.get("action", {})
     params = action.get("detailParams", {})
+    request_id = uuid.uuid4().hex[:8]
     
     # 1. UserKey 추출 및 멤버 확보
     userkey = user_request.get("user", {}).get("id", "")
@@ -96,7 +129,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         print(f"⚠️ 휴무 자동 갱신 체크 실패(webhook): {e}")
     
     # 📝 [로그 출력] 챗봇이 보낸 UserKey를 서버 터미널에서 즉시 확인합니다.
-    print(f"\n================ [카카오 웹훅 수신] ================")
+    print(f"\n================ [카카오 웹훅 수신:{request_id}] ================")
     print(f"► 유저키(UserKey): {userkey}")
     print(f"► 수신 텍스트(utterance): {utterance}")
     print(f"====================================================\n")
@@ -120,7 +153,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     if not member_record:
         # [자동 회원가입 로직]
         # 이미지를 보냈거나, 텍스트가 너무 길거나(15자), 하단 퀵리플라이 버튼을 누른 경우 가입 안내 문구 발송
-        is_button_click = utterance in ["인증", "반휴 인증", "주휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"]
+        is_button_click = utterance in RESERVED_NICK_INPUTS
         
         if image_url or len(utterance) > 15 or is_button_click:
             return build_kakao_response(
@@ -132,8 +165,23 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         
         # 그 외의 짧은 텍스트는 닉네임으로 간주하여 즉시 등록
         target_nick = utterance.strip()
+        nick_error = get_nickname_validation_error(target_nick)
+        if nick_error:
+            return build_kakao_response(
+                f"⚠️ 닉네임 등록이 필요합니다.\n({nick_error})\n\n"
+                "구루미 닉네임을 15자 이하로 입력해 주세요.\n"
+                "(예: 키뮤)"
+            )
+        if is_duplicate_nickname(userkey, target_nick):
+            return build_kakao_response(
+                "⚠️ 이미 사용 중인 닉네임입니다.\n"
+                "다른 닉네임으로 다시 입력해 주세요."
+            )
         new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "1"]
-        sheets_client.append_row("Member_Master", new_row)
+        append_ok = sheets_client.append_row("Member_Master", new_row)
+        if not append_ok:
+            print(f"[{request_id}] ❌ 회원가입 append_row 실패 userkey={userkey}, nickname={target_nick}")
+            return build_kakao_response("❌ 회원가입 처리 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
         
         return build_kakao_response(
             f"✅ '{target_nick}'님, 가입이 완료되었습니다!\n"
@@ -142,8 +190,39 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             f"하단의 메뉴 버튼을 이용해 인증을 시작해 보세요."
         )
         
-    nickname = member_record.get("닉네임", "Unkown")
     row_idx = member_record.get("_row_index", -1)
+    nickname = str(member_record.get("닉네임", "")).strip()
+
+    # [중요] 기존에 빈 닉네임으로 등록된 사용자는 다른 기능 진입 전에 닉네임부터 강제 등록
+    if not nickname:
+        if image_url or not utterance or utterance in RESERVED_NICK_INPUTS:
+            return build_kakao_response(
+                "⚠️ 닉네임 등록이 아직 완료되지 않았습니다.\n\n"
+                "구루미 닉네임을 먼저 채팅창에 입력해 주세요.\n"
+                "(예: 키뮤)"
+            )
+
+        nick_error = get_nickname_validation_error(utterance)
+        if nick_error:
+            return build_kakao_response(
+                f"⚠️ 닉네임으로 사용할 수 없는 입력입니다.\n({nick_error})\n\n"
+                "구루미 닉네임을 다시 입력해 주세요."
+            )
+        if is_duplicate_nickname(userkey, utterance):
+            return build_kakao_response(
+                "⚠️ 이미 사용 중인 닉네임입니다.\n"
+                "다른 닉네임으로 다시 입력해 주세요."
+            )
+
+        update_ok = sheets_client.update_cell("Member_Master", row_idx, 1, utterance.strip())
+        if not update_ok:
+            print(f"[{request_id}] ❌ 빈 닉네임 보정 실패 userkey={userkey}, row_idx={row_idx}, nickname={utterance.strip()}")
+            return build_kakao_response("❌ 닉네임 등록 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.")
+
+        return build_kakao_response(
+            f"✅ 닉네임이 '{utterance.strip()}'으로 등록되었습니다!\n\n"
+            "이제 하단 메뉴 버튼으로 인증을 진행해 주세요."
+        )
 
     # [목표 시간 변경] "목표변경 3시간" 또는 버튼 클릭
     utterance_clean = utterance.replace(" ", "")
@@ -488,7 +567,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         col_updates.append((5, format_min_to_str(total_mnts)))
                         
                     # 🚀 백그라운드로 구글 시트 업데이트 넘김 (응답 시간 대폭 단축!)
-                    background_tasks.add_task(update_sheets_in_background, row_idx, col_updates, log_row)
+                    background_tasks.add_task(update_sheets_in_background, request_id, row_idx, col_updates, log_row)
                     
                     reply_text = (
                         f"✅ [{auth_type}] 인증 제출이 완료되었습니다!\n\n"
@@ -502,7 +581,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
 
             except Exception as e:
                 reply_text = f"서버 처리 중 오류가 발생했습니다: {e}"
-                print(f"⚠️ Exception 됨: {e}")
+                print(f"[{request_id}] ⚠️ Exception 됨: {e}")
+                print(traceback.format_exc())
 
     print(f"📨 [카카오 응답 전송]: {reply_text[:100]}...")
     return build_kakao_response(reply_text)
