@@ -225,7 +225,16 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 "⚠️ 이미 사용 중인 닉네임입니다.\n"
                 "다른 닉네임으로 다시 입력해 주세요."
             )
-        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "1"]
+        # 신규회원의 기본 특휴 개수를 현재 달(Admin) 설정에서 가져오기
+        try:
+            admin_rows = sheets_client.get_sheet_records("Admin_Config")
+            month_key = datetime.now().strftime("%Y-%m")
+            default_special_leave = leave_reset_service._resolve_monthly_special_leave(admin_rows, month_key)
+        except Exception as e:
+            print(f"⚠️ 신규회원 특휴개수 조회 실패: {e}")
+            default_special_leave = "1"
+
+        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", default_special_leave]
         append_ok = sheets_client.append_row("Member_Master", new_row)
         if not append_ok:
             print(f"[{request_id}] ❌ 회원가입 append_row 실패 userkey={userkey}, nickname={target_nick}")

@@ -165,8 +165,7 @@ class GoogleSheetsClient:
         if self.is_mock:
             return 0
         try:
-            worksheet = self.spreadsheet.worksheet("Daily_Log")
-            records = worksheet.get_all_records()
+            records = self.get_sheet_records("Daily_Log")
             for row in records:
                 if str(row.get("날짜", "")) == target_date and str(row.get("닉네임", "")) == nickname:
                     try:
@@ -183,8 +182,7 @@ class GoogleSheetsClient:
         if self.is_mock:
             return {}
         try:
-            worksheet = self.spreadsheet.worksheet("Daily_Log")
-            records = worksheet.get_all_records()
+            records = self.get_sheet_records("Daily_Log")
             for row in records:
                 if str(row.get("날짜", "")) == target_date and str(row.get("닉네임", "")) == nickname:
                     # 기존 인증 시간 파싱 (예: "1시간 32분" -> 92분)
