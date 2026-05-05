@@ -153,7 +153,8 @@ def process_refund(target_date: str, nickname: str, member_record: dict, row_idx
         refund_msg += f"\n(기존 패널티 {old_penalty}원이 예치금으로 반환되었습니다.)"
 
     if refund_msg:
-        print(f"🔄 [{nickname}] 이전 기록({prev_type}) 덮어쓰기 환불 완료: {refund_msg.replace('\n', ' ')}")
+        log_msg = refund_msg.replace('\n', ' ')
+        print(f"🔄 [{nickname}] 이전 기록({prev_type}) 덮어쓰기 환불 완료: {log_msg}")
 
     return refund_msg
 
