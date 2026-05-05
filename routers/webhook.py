@@ -111,6 +111,117 @@ def update_sheets_in_background(request_id: str, row_idx: int, col_updates: list
         print(f"[{request_id}] ❌ [백그라운드] 구글 시트 업데이트 중 에러 발생: {e}")
         print(traceback.format_exc())
 
+def process_photo_auth_in_background(
+    request_id: str, image_url: str, auth_type: str, nickname: str,
+    member_record: dict, row_idx: int, target_date: str,
+    target_override, pending_deduct_amt: float, refund_msg: str, now: datetime
+):
+    """
+    [카카오 5초 타임아웃 완전 회피]
+    사진 다운로드 → OCR → 벌금 계산 → 구글 시트 기록을 모두 백그라운드에서 처리합니다.
+    카카오에게는 즉시 '접수 완료' 응답을 보낸 뒤, 이 함수가 뒤에서 천천히 돌아갑니다.
+    """
+    import asyncio
+    try:
+        from integrations.google_sheets import sheets_client as bg_sheets
+        from services.ocr_service import ocr_service as bg_ocr
+        from services.settlement_engine import settlement_engine as bg_engine
+        from services.check_in_engine import check_in_engine as bg_checkin
+
+        print(f"[{request_id}] 🔄 [백그라운드-사진인증] 처리 시작: {nickname} ({auth_type})")
+
+        # 1. 이미지 다운로드 (동기 방식으로 변환)
+        import httpx
+        resp = httpx.get(image_url, timeout=15)
+        resp.raise_for_status()
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+        temp_file.write(resp.content)
+        temp_file.close()
+        local_path = temp_file.name
+        drive_url = image_url
+
+        # 2. OCR 파싱
+        ocr_result = bg_ocr.extract_time_from_image(local_path)
+        os.remove(local_path)
+        end_time, duration, total_mnts, full_text = ocr_result[0], ocr_result[1], ocr_result[2], ocr_result[3]
+
+        if not end_time or duration == 0:
+            print(f"[{request_id}] ❌ [백그라운드-사진인증] OCR 실패 (시간 정보 미발견)")
+            # OCR 실패해도 시트에 기록은 남김
+            log_row = [target_date, nickname, auth_type, "OCR실패", "-", "-", "-", "0", drive_url]
+            bg_sheets.upsert_daily_log(log_row)
+            return
+
+        # 3. 목표시간 계산
+        bt_str = str(member_record.get("목표시간", "120")).strip()
+        base_target = parse_duration_to_min(bt_str)
+        if base_target == 0:
+            base_target = 120
+        final_target = target_override * 60 if target_override else base_target
+
+        # 4. 시간 위조 및 지각 검증
+        is_fake_date, is_absent, is_ontime = bg_checkin.validate_ocr_time(
+            target_date, end_time, duration, final_target
+        )
+
+        # 누적 시간 조작 검사는 비활성화 (사용자 요청)
+        is_fake_time = False
+
+        # 닉네임 로깅
+        clean_nick = nickname.replace(" ", "")
+        if clean_nick not in full_text.replace(" ", ""):
+            print(f"⚠️ [주의] 닉네임 불일치 감지: DB={clean_nick}, OCR텍스트에 없음")
+
+        # 5. 벌금 계산
+        penalty = bg_engine.calculate_penalty(
+            target_minutes=final_target,
+            auth_minutes=duration,
+            is_late_submit=not is_ontime,
+            is_fake_time=is_fake_time,
+            is_fake_date=is_fake_date,
+            is_absent=is_absent
+        )
+
+        is_failed = is_absent or (duration < final_target)
+        if is_failed:
+            status_msg = "결석(목표미달)"
+        elif is_fake_date:
+            status_msg = "허위(예전사진)"
+        else:
+            status_msg = "PASS" if penalty == 0 else "경고/지각발송"
+
+        # 6. 시트 업데이트 수집
+        col_updates = []
+
+        if auth_type == "반휴" and not is_failed and not is_fake_date:
+            new_val = max(0.0, float(member_record.get("주간휴무", "0")) - pending_deduct_amt)
+            col_updates.append((6, str(new_val)))
+
+        if penalty < 0:
+            old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+            old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
+            new_deposit = old_deposit + penalty
+            col_updates.append((8, str(new_deposit)))
+
+        dur_str = f"{duration//60}시간 {duration%60}분"
+        tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
+        log_row = [target_date, nickname, auth_type, status_msg, "-", dur_str, tot_str, str(penalty), drive_url]
+
+        if not is_fake_date and total_mnts > 0:
+            col_updates.append((5, format_min_to_str(total_mnts)))
+
+        # 7. 구글 시트 반영
+        for col_idx, val in col_updates:
+            bg_sheets.update_cell("Member_Master", row_idx, col_idx, val)
+        bg_sheets.upsert_daily_log(log_row)
+
+        print(f"[{request_id}] ✅ [백그라운드-사진인증] 완료: {nickname} → {status_msg}, 벌금={penalty}")
+        print(f"  - 금일공부: {dur_str}, 누적: {tot_str}, 목표: {final_target}분")
+
+    except Exception as e:
+        print(f"[{request_id}] ❌ [백그라운드-사진인증] 에러 발생: {e}")
+        print(traceback.format_exc())
+
 def process_refund(target_date: str, nickname: str, member_record: dict, row_idx: int) -> str:
     """이전 인증/휴무가 있었다면 휴무 횟수와 벌금을 환불하고 결과 메시지를 반환합니다."""
     from integrations.google_sheets import sheets_client
@@ -480,127 +591,23 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 target_override = 1 # 반휴는 목표 1시간으로 고정
                 pending_deduct_amt = deduct_amt # 검증 통과 시 차감하기 위해 보류
 
-            # 타임아웃 방지: OCR만 동기처리, 구글시트 업데이트는 백그라운드로 미룸
-            try:
-                is_ontime = check_in_engine.is_within_deadline(now)
-                local_path = await download_image(image_url)
-                drive_url = image_url # 카카오 사진 원본 링크 직접 사용 (구글 드라이브 업로드 생략)
-                
-                # OCR 서비스가 (종료시각, 당일공부시간(분), 누적시간(분), 원문) 튜플 반환
-                ocr_result = ocr_service.extract_time_from_image(local_path)
-                os.remove(local_path)
-                
-                end_time, duration, total_mnts, full_text = ocr_result[0], ocr_result[1], ocr_result[2], ocr_result[3]
-                
-                if not end_time or duration == 0:
-                    reply_text = "❌ OCR 엔진이 시간 정보를 찾지 못했습니다. 숫자가 선명하게 나오도록 자르지 말고 다시 찍어주세요!"
-                else:
-                    bt_str = str(member_record.get("목표시간", "120")).strip()
-                    base_target = parse_duration_to_min(bt_str)
-                    if base_target == 0:
-                        base_target = 120
-                    final_target = target_override * 60 if target_override else base_target
-                    
-                    # --- [신규 로직] 시간 위조 및 지각 검증 ---
-                    is_fake_date, is_absent, is_ontime = check_in_engine.validate_ocr_time(
-                        target_date, end_time, duration, final_target
-                    )
-                    
-                    # --- [신규 로직] 누적 시간(Total Time) 60분 오차 및 닉네임 교차 검증 ---
-                    is_fake_time = False
-                    is_fake_nickname = False
-                    
-                    # 1. 닉네임 일치 검사 (단순 로깅용으로만 사용, 오인식으로 인한 억울한 패널티 방지)
-                    clean_nick = nickname.replace(" ", "")
-                    if clean_nick not in full_text.replace(" ", ""):
-                        print(f"⚠️ [주의] 닉네임 불일치 감지: DB={clean_nick}, OCR텍스트에 없음")
-                        # is_fake_nickname = True # 오인식으로 인한 -5000원 방지를 위해 비활성화
-                        
-                    old_acc_str = str(member_record.get("최종누적", "0"))
-                    old_acc = parse_duration_to_min(old_acc_str)
-                    
-                    # 2. 누적시간 오차 검사
-                    # [재인증 보정 로직] 이미 오늘 인증을 해서 Member_Master의 '최종누적'이 오늘치(duration)를 포함해버린 경우, 
-                    # 다시 인증하면 (old_acc + duration)이 실제 total_mnts보다 duration만큼 커져서 조작으로 오탐지됩니다.
-                    # 이를 방지하기 위해 오늘 이미 인증한 내역이 있는지 확인하여 old_acc에서 이전 인증 시간을 빼줍니다.
-                    today_auth = sheets_client.get_today_auth_history(target_date, nickname)
-                    if today_auth:
-                        prev_duration = today_auth.get("prev_duration", 0)
-                        prev_status = today_auth.get("prev_status", "")
-                        # 이전 기록이 허위/조작이 아니었다면 (즉, 최종누적이 업데이트된 기록이라면) 그만큼 빼서 "오늘 첫 인증 직전의 누적"으로 되돌림
-                        if prev_duration > 0 and "허위" not in prev_status and "조작" not in prev_status:
-                            old_acc = max(0, old_acc - prev_duration)
-                            print(f"🔄 [재인증 보정] {nickname}님의 오늘 이전 인증시간({prev_duration}분)을 제외하고 검증합니다. 보정된 기준누적: {old_acc}")
-
-                    if total_mnts > 0 and old_acc > 0:
-                        diff = abs((old_acc + duration) - total_mnts)
-                        if diff > 60:
-                            is_fake_time = True
-                            print(f"🚨 [조작 감지] 닉네임: {nickname}, 계산된오차: {diff}분 (DB기준누적:{old_acc} + 당일:{duration} != OCR총누적:{total_mnts})")
-                            
-                    # 벌금 계산
-                    penalty = settlement_engine.calculate_penalty(
-                        target_minutes=final_target, 
-                        auth_minutes=duration, 
-                        is_late_submit=not is_ontime, 
-                        is_fake_time=is_fake_time,
-                        is_fake_date=is_fake_date,
-                        is_absent=is_absent
-                    )
-                    
-                    # 미달 판단: 1시 이후 전송실패(is_absent)이거나 인증 시간이 목표시간(반휴 1시간)에 못 미칠 때
-                    is_failed = is_absent or (duration < final_target)
-
-                    if is_failed:
-                        status_msg = "결석(목표미달)"
-                    elif is_fake_date:
-                        status_msg = "허위(예전사진)" 
-                    elif is_fake_time:
-                        status_msg = "조작(누적오류)"
-                    else:
-                        status_msg = "PASS" if penalty == 0 else "경고/지각발송"
-                        
-                    # --- [백그라운드 처리용 변수 수집] 구글 API 호출(약 3초)을 뒤로 미뤄서 타임아웃 회피 ---
-                    col_updates = []
-                    
-                    if auth_type == "반휴" and not is_failed and not is_fake_date and not is_fake_time:
-                        col_idx = 6 # 주간휴무 컬럼
-                        new_val = max(0.0, float(member_record.get("주간휴무", "0")) - pending_deduct_amt)
-                        col_updates.append((col_idx, str(new_val)))
-                        
-                    if penalty < 0:
-                        old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
-                        old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
-                        new_deposit = old_deposit + penalty # penalty는 -500 등 음수값
-                        col_updates.append((8, str(new_deposit))) # H열(8)이 예치금
-                    
-                    # 당일시간(종류), 사진누적(분->시간)
-                    dur_str = f"{duration//60}시간 {duration%60}분"
-                    tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
-                    log_row = [target_date, nickname, auth_type, status_msg, "-", dur_str, tot_str, str(penalty), drive_url]
-                    
-                    if not is_fake_date and not is_fake_time and total_mnts > 0:
-                        col_updates.append((5, format_min_to_str(total_mnts)))
-                        
-                    # 🚀 백그라운드로 구글 시트 업데이트 넘김 (응답 시간 대폭 단축!)
-                    background_tasks.add_task(update_sheets_in_background, request_id, row_idx, col_updates, log_row)
-                    
-                    reply_text = (
-                        f"✅ [{auth_type}] 인증 제출이 완료되었습니다!\n\n"
-                        f"- 판정결과: {status_msg}\n"
-                        f"- 적용 목표시간: {final_target//60}시간 {final_target%60}분\n"
-                        f"- 당일 공부시간: {dur_str}\n"
-                        f"- 누적 공부시간: {tot_str}\n"
-                        f"- 사진 인식시점: {end_time}\n"
-                        f"- 이번 인증 벌금: {penalty}원"
-                    )
-                    if refund_msg:
-                        reply_text += f"\n{refund_msg}"
-
-            except Exception as e:
-                reply_text = f"서버 처리 중 오류가 발생했습니다: {e}"
-                print(f"[{request_id}] ⚠️ Exception 됨: {e}")
-                print(traceback.format_exc())
+            # 🚀 [카카오 5초 타임아웃 완전 회피]
+            # 사진 다운로드 + OCR + 시트 기록을 전부 백그라운드로 넘기고,
+            # 카카오에게는 즉시 "접수 완료!" 응답을 1초 이내에 반환합니다.
+            background_tasks.add_task(
+                process_photo_auth_in_background,
+                request_id, image_url, auth_type, nickname,
+                dict(member_record), row_idx, target_date,
+                target_override, pending_deduct_amt, refund_msg, now
+            )
+            
+            reply_text = (
+                f"📸 [{auth_type}] 인증 사진이 접수되었습니다!\n\n"
+                f"OCR 분석과 시트 기록이 자동으로 진행됩니다.\n"
+                f"(약 10~15초 소요, 결과는 대시보드에서 확인 가능)"
+            )
+            if refund_msg:
+                reply_text += f"\n{refund_msg}"
 
     print(f"📨 [카카오 응답 전송]: {reply_text[:100]}...")
     return build_kakao_response(reply_text)
