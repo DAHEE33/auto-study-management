@@ -40,7 +40,7 @@ router = APIRouter(prefix="/webhook", tags=["Webhook"])
 # 봇이 사용자 요청 맥락을 기억하기 위한 상태 저장소 (메모리 방식)
 # 형태: { "UserKey": {"type": "반휴" | "특휴", "expires": datetime_object} }
 user_states = {}
-RESERVED_NICK_INPUTS = {"인증", "반휴 인증", "주휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"}
+RESERVED_NICK_INPUTS = {"인증", "반휴 인증", "주휴 사용", "월휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"}
 
 def build_kakao_response(text: str) -> Dict[str, Any]:
     """카카오 i 챗봇 스펙에 맞춘 심플한 텍스트 응답 제네레이터"""
@@ -52,6 +52,7 @@ def build_kakao_response(text: str) -> Dict[str, Any]:
                 {"messageText": "인증", "action": "message", "label": "🔥 일반 인증"},
                 {"messageText": "반휴 인증", "action": "message", "label": "🌗 반휴 사용"},
                 {"messageText": "주휴 사용", "action": "message", "label": "🏖️ 주휴 사용"},
+                {"messageText": "월휴 사용", "action": "message", "label": "🌙 월휴 사용"},
                 {"messageText": "특휴 증빙하기", "action": "message", "label": "🏥 특휴 신청"},
                 {"messageText": "내 현황", "action": "message", "label": "📈 내 현황 확인"},
                 {"messageText": "목표 변경", "action": "message", "label": "🎯 목표시간 변경"}
@@ -109,6 +110,52 @@ def update_sheets_in_background(request_id: str, row_idx: int, col_updates: list
     except Exception as e:
         print(f"[{request_id}] ❌ [백그라운드] 구글 시트 업데이트 중 에러 발생: {e}")
         print(traceback.format_exc())
+
+def process_refund(target_date: str, nickname: str, member_record: dict, row_idx: int) -> str:
+    """이전 인증/휴무가 있었다면 휴무 횟수와 벌금을 환불하고 결과 메시지를 반환합니다."""
+    from integrations.google_sheets import sheets_client
+    today_auth = sheets_client.get_today_auth_history(target_date, nickname)
+    refund_msg = ""
+    if not today_auth:
+        return refund_msg
+
+    prev_type = today_auth.get("prev_type", "")
+    
+    # 1. 휴무 차감분 환불
+    if prev_type == "주휴":
+        old_val = float(str(member_record.get("주간휴무", "0")))
+        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_val + 1.0))
+        member_record["주간휴무"] = str(old_val + 1.0)
+        refund_msg += "\n(이전 주휴 차감분 1.0이 환불되었습니다.)"
+    elif prev_type == "반휴":
+        old_val = float(str(member_record.get("주간휴무", "0")))
+        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_val + 0.5))
+        member_record["주간휴무"] = str(old_val + 0.5)
+        refund_msg += "\n(이전 반휴 차감분 0.5가 환불되었습니다.)"
+    elif prev_type == "월휴":
+        old_val = float(str(member_record.get("남은월휴", "0")))
+        sheets_client.update_cell("Member_Master", row_idx, 7, str(old_val + 1.0))
+        member_record["남은월휴"] = str(old_val + 1.0)
+        refund_msg += "\n(이전 월휴 차감분 1.0이 환불되었습니다.)"
+    elif prev_type == "특휴":
+        old_val = float(str(member_record.get("남은특휴", "0")))
+        sheets_client.update_cell("Member_Master", row_idx, 10, str(old_val + 1.0))
+        member_record["남은특휴"] = str(old_val + 1.0)
+        refund_msg += "\n(이전 특휴 차감분 1.0이 환불되었습니다.)"
+
+    # 2. 벌금 환불
+    old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
+    if old_penalty < 0:
+        old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+        old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
+        sheets_client.update_cell("Member_Master", row_idx, 8, str(old_deposit + abs(old_penalty)))
+        member_record["예치금"] = str(old_deposit + abs(old_penalty))
+        refund_msg += f"\n(기존 패널티 {old_penalty}원이 예치금으로 반환되었습니다.)"
+
+    if refund_msg:
+        print(f"🔄 [{nickname}] 이전 기록({prev_type}) 덮어쓰기 환불 완료: {refund_msg.replace('\n', ' ')}")
+
+    return refund_msg
 
 @router.post("")
 async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -303,16 +350,18 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         action_type = "status"
     elif is_week_off:
         action_type = "week_off"
+    elif is_month_off:
+        action_type = "month_off"
     elif is_special_off:
         action_type = "special_off"
     else:
-        # 일반 인증/반휴 인증/월휴 처리
+        # 일반 인증/반휴 인증 처리
         action_type = "general_auth"
 
     if not check_in_engine.is_action_allowed(action_type, now):
-        if action_type in ("week_off", "special_off"):
-            return build_kakao_response("❌ 처리 가능 시간이 지났습니다.\n(주휴/특휴 마감: 익일 12:00, 오픈: 당일 17:00)")
-        return build_kakao_response("❌ 처리 기간이 지났습니다.\n(일반/반휴/월휴 마감: 익일 02:00, 오픈: 당일 17:00)")
+        if action_type in ("week_off", "month_off", "special_off"):
+            return build_kakao_response("❌ 처리 가능 시간이 지났습니다.\n(주휴/월휴/특휴 마감: 익일 12:00, 오픈: 당일 17:00)")
+        return build_kakao_response("❌ 처리 기간이 지났습니다.\n(일반/반휴 마감: 익일 02:00, 오픈: 당일 17:00)")
 
     # 💡 [휴무일(자율참여) 우선 차단]
     admin_events = sheets_client.get_sheet_records("Admin_Config")
@@ -347,36 +396,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         # [주휴 / 월휴] (버튼 클릭만으로 완료되는 로직)
         leave_type = "주휴" if is_week_off else "월휴"
         
-        # --- [당일 전환 로직] 이미 오늘 반휴/일반 인증이 있었다면 이전 차감을 환불하고 전환 ---
-        today_auth = sheets_client.get_today_auth_history(target_date, nickname)
-        refund_msg = ""
-        if today_auth:
-            prev_status = today_auth.get("prev_status", "")
-            # 이전에 반휴로 인증했었다면 주간휴무 0.5를 환불
-            prev_type = ""
-            daily_logs = sheets_client.get_sheet_records("Daily_Log")
-            for log in daily_logs:
-                if str(log.get("날짜", "")) == target_date and str(log.get("닉네임", "")) == nickname:
-                    prev_type = str(log.get("유형", ""))
-                    break
-            
-            if prev_type == "반휴":
-                # 반휴 차감분(0.5) 환불
-                old_weekly = float(str(member_record.get("주간휴무", "0")))
-                sheets_client.update_cell("Member_Master", row_idx, 6, str(old_weekly + 0.5))
-                # member_record의 값도 갱신 (이후 검증에 영향)
-                member_record["주간휴무"] = str(old_weekly + 0.5)
-                refund_msg = "\n(이전 반휴 차감분 0.5가 환불된 후 전환되었습니다.)"
-                print(f"🔄 [{nickname}] 반휴→{leave_type} 전환: 주간휴무 0.5 환불 ({old_weekly} → {old_weekly + 0.5})")
-            
-            # 이전 벌금이 있었다면 환불
-            old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
-            if old_penalty < 0:
-                old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
-                old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
-                new_deposit = old_deposit + abs(old_penalty)
-                sheets_client.update_cell("Member_Master", row_idx, 8, str(new_deposit))
-                refund_msg += f"\n(기존 패널티 {old_penalty}원이 예치금으로 반환되었습니다.)"
+        # --- [당일 전환 로직] 이미 오늘 인증이 있었다면 이전 차감을 환불하고 전환 ---
+        refund_msg = process_refund(target_date, nickname, member_record, row_idx)
         
         is_approved, msg, deduct_amt = check_in_engine.process_leave_request(member_record, leave_type)
         
@@ -403,12 +424,23 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             reply_text = "🏥 특휴 처리를 위해 처방전이나 수험표 등의 증빙 사진을 지금 전송해 주세요."
         else:
             try:
+                # --- [당일 전환 로직] 특휴 제출 시에도 이전 기록/벌금 환불 ---
+                refund_msg = process_refund(target_date, nickname, member_record, row_idx)
+                
+                # 특휴 잔여량 확인
+                old_special = float(str(member_record.get("남은특휴", "0")))
+                if old_special < 1.0:
+                    return build_kakao_response("❌ 잔여 특휴가 부족합니다.")
+                
+                # 특휴 차감
+                sheets_client.update_cell("Member_Master", row_idx, 10, str(old_special - 1.0))
+                
                 drive_url = image_url # 카카오 사진 원본 링크를 직접 사용 (구글 드라이브 업로드 생략)
                 
                 # '대기', 승인여부 'N' (기존 기록이 있다면 덮어쓰기)
                 log_row = [target_date, nickname, "특휴", "대기", "N", "-", "-", "0", drive_url]
                 sheets_client.upsert_daily_log(log_row)
-                reply_text = "🏥 특휴 증빙 사진이 정상 접수되었습니다. 방장 확인(승인) 전까지는 대기 상태가 유지됩니다."
+                reply_text = "🏥 특휴 증빙 사진이 정상 접수되었습니다. 방장 확인(승인) 전까지는 대기 상태가 유지됩니다." + refund_msg
             except Exception as e:
                 reply_text = f"이미지 업로드 중 에러 발생: {e}"
 
@@ -426,37 +458,11 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             target_override = None
             pending_deduct_amt = 0
             
-            # 반휴일 경우 우선 잔여휴무 검증 + 당일 전환 처리
+            # --- [당일 전환 로직] 환불 공통 처리 ---
+            refund_msg = process_refund(target_date, nickname, member_record, row_idx)
+            
+            # 반휴일 경우 우선 잔여휴무 검증
             if auth_type == "반휴":
-                # --- [당일 전환 로직] 이미 오늘 주휴/일반으로 인증했다면 이전 차감 환불 ---
-                today_auth = sheets_client.get_today_auth_history(target_date, nickname)
-                if today_auth:
-                    prev_type = ""
-                    daily_logs_check = sheets_client.get_sheet_records("Daily_Log")
-                    for log in daily_logs_check:
-                        if str(log.get("날짜", "")) == target_date and str(log.get("닉네임", "")) == nickname:
-                            prev_type = str(log.get("유형", ""))
-                            break
-                    if prev_type == "주휴":
-                        # 주휴 차감분(1.0) 환불
-                        old_weekly = float(str(member_record.get("주간휴무", "0")))
-                        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_weekly + 1.0))
-                        member_record["주간휴무"] = str(old_weekly + 1.0)
-                        print(f"🔄 [{nickname}] 주휴→반휴 전환: 주간휴무 1.0 환불 ({old_weekly} → {old_weekly + 1.0})")
-                    elif prev_type == "반휴":
-                        # 이전 반휴 차감분(0.5) 환불 (재인증)
-                        old_weekly = float(str(member_record.get("주간휴무", "0")))
-                        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_weekly + 0.5))
-                        member_record["주간휴무"] = str(old_weekly + 0.5)
-                        print(f"🔄 [{nickname}] 반휴 재인증: 주간휴무 0.5 환불 ({old_weekly} → {old_weekly + 0.5})")
-                    # 이전 벌금 환불
-                    old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
-                    if old_penalty < 0:
-                        old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
-                        old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
-                        sheets_client.update_cell("Member_Master", row_idx, 8, str(old_deposit + abs(old_penalty)))
-                        member_record["예치금"] = str(old_deposit + abs(old_penalty))
-                
                 is_approved, msg, deduct_amt = check_in_engine.process_leave_request(member_record, "반휴")
                 if not is_approved:
                     return build_kakao_response(msg)
@@ -578,6 +584,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                         f"- 사진 인식시점: {end_time}\n"
                         f"- 이번 인증 벌금: {penalty}원"
                     )
+                    if refund_msg:
+                        reply_text += f"\n{refund_msg}"
 
             except Exception as e:
                 reply_text = f"서버 처리 중 오류가 발생했습니다: {e}"

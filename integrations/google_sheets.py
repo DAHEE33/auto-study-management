@@ -203,7 +203,8 @@ class GoogleSheetsClient:
                         
                     return {
                         "prev_duration": prev_duration,
-                        "prev_status": str(row.get("판정", ""))
+                        "prev_status": str(row.get("판정", "")),
+                        "prev_type": str(row.get("유형", ""))
                     }
             return {}
         except Exception as e:

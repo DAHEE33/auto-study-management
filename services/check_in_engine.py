@@ -54,7 +54,7 @@ class CheckInEngine:
             return True
 
         hour = current_dt.hour
-        if action_type in ("week_off", "special_off"):
+        if action_type in ("week_off", "month_off", "special_off"):
             return hour >= 17 or hour < 12
 
         return hour >= 17 or hour < 2
