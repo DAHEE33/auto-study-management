@@ -249,10 +249,7 @@ def process_refund(target_date: str, nickname: str, member_record: dict, row_idx
         member_record["남은월휴"] = str(old_val + 1.0)
         refund_msg += "\n(이전 월휴 차감분 1.0이 환불되었습니다.)"
     elif prev_type == "특휴":
-        old_val = float(str(member_record.get("남은특휴", "0")))
-        sheets_client.update_cell("Member_Master", row_idx, 10, str(old_val + 1.0))
-        member_record["남은특휴"] = str(old_val + 1.0)
-        refund_msg += "\n(이전 특휴 차감분 1.0이 환불되었습니다.)"
+        refund_msg += "\n(이전 특휴 신청 내역이 취소되었습니다.)"
 
     # 2. 벌금 환불
     old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
@@ -336,16 +333,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 "⚠️ 이미 사용 중인 닉네임입니다.\n"
                 "다른 닉네임으로 다시 입력해 주세요."
             )
-        # 신규회원의 기본 특휴 개수를 현재 달(Admin) 설정에서 가져오기
-        try:
-            admin_rows = sheets_client.get_sheet_records("Admin_Config")
-            month_key = datetime.now().strftime("%Y-%m")
-            default_special_leave = leave_reset_service._resolve_monthly_special_leave(admin_rows, month_key)
-        except Exception as e:
-            print(f"⚠️ 신규회원 특휴개수 조회 실패: {e}")
-            default_special_leave = "1"
-
-        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", default_special_leave]
+        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "-"]
         append_ok = sheets_client.append_row("Member_Master", new_row)
         if not append_ok:
             print(f"[{request_id}] ❌ 회원가입 append_row 실패 userkey={userkey}, nickname={target_nick}")
@@ -547,14 +535,6 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             try:
                 # --- [당일 전환 로직] 특휴 제출 시에도 이전 기록/벌금 환불 ---
                 refund_msg = process_refund(target_date, nickname, member_record, row_idx)
-                
-                # 특휴 잔여량 확인
-                old_special = float(str(member_record.get("남은특휴", "0")))
-                if old_special < 1.0:
-                    return build_kakao_response("❌ 잔여 특휴가 부족합니다.")
-                
-                # 특휴 차감
-                sheets_client.update_cell("Member_Master", row_idx, 10, str(old_special - 1.0))
                 
                 drive_url = image_url # 카카오 사진 원본 링크를 직접 사용 (구글 드라이브 업로드 생략)
                 
