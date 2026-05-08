@@ -24,7 +24,7 @@ class GoogleSheetsClient:
         # 최신 설계 기준 모의 데이터
         self.mock_data = {
             "Member_Master": [
-                {"닉네임": "dev_user", "UserKey": "UK123", "상태": "활동", "목표시간": "120", "최종누적": "15600", "주간휴무": "1.0", "남은월휴": "1", "예치금": "10000", "비고": "-", "남은특휴": "1"},
+                {"닉네임": "dev_user", "UserKey": "UK123", "상태": "활동", "목표시간": "120", "최종누적": "15600", "주간휴무": "1.0", "남은월휴": "1", "예치금": "10000", "비고": "-", "남은특휴": "1", "가입일자": "2026-05-08", "예치금환불": "불가"},
             ],
             "Daily_Log": [],
             "Admin_Config": [{"날짜": "2026-05-01", "이벤트 타입": "특휴개수", "목표시간 조정": "0", "주간 공지사항 (추가 멘트)": "-", "월별특휴개수": "3"}]
@@ -224,12 +224,14 @@ class GoogleSheetsClient:
             val1 = ws_member.get("A1")
             if not val1 or not val1[0]:
                 ws_member.update("A1", [
-                    ["닉네임", "UserKey", "상태", "목표시간", "최종누적", "주간휴무", "남은월휴", "예치금", "비고", "남은특휴"],
-                    ["dev_user", "UK123", "활동", "120", "15,600", "1.0", "1", "10,000", "-", "1"]
+                    ["닉네임", "UserKey", "상태", "목표시간", "최종누적", "주간휴무", "남은월휴", "예치금", "비고", "남은특휴", "가입일자", "예치금환불"],
+                    ["dev_user", "UK123", "활동", "120", "15,600", "1.0", "1", "10,000", "-", "1", "2026-05-08", "불가"]
                 ])
                 print("✔️ 'Member_Master' 시트에 기초 데이터 삽입 완료")
             else:
                 member_headers = ws_member.row_values(1)
+                
+                # 남은특휴 컬럼 점검 및 추가
                 if "남은특휴" not in member_headers:
                     ws_member.add_cols(1)
                     member_headers.append("남은특휴")
@@ -240,6 +242,20 @@ class GoogleSheetsClient:
                         if not current_val:
                             ws_member.update_cell(idx, 10, "1")
                     print("✔️ 'Member_Master' 시트에 '남은특휴' 컬럼 추가 완료")
+                
+                # 가입일자 및 예치금환불 컬럼 점검 및 추가
+                member_headers = ws_member.row_values(1)
+                if "가입일자" not in member_headers or "예치금환불" not in member_headers:
+                    if "가입일자" not in member_headers:
+                        ws_member.add_cols(1)
+                        member_headers.append("가입일자")
+                    if "예치금환불" not in member_headers:
+                        ws_member.add_cols(1)
+                        member_headers.append("예치금환불")
+                        
+                    end_col_letter = chr(ord('A') + len(member_headers) - 1)
+                    ws_member.update(f"A1:{end_col_letter}1", [member_headers])
+                    print("✔️ 'Member_Master' 시트에 '가입일자', '예치금환불' 컬럼 추가 완료")
 
             # 2. Daily_Log 세팅
             try:

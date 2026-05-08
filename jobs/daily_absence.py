@@ -84,6 +84,27 @@ def run_daily_absence_job():
             print(f"   -> ✔️ [처리 완료] {nickname}님 결석(-2000) 기록 확정 및 예치금 차감 완료")
             processed_absent += 1
 
+    # 5. 가입일자 기준 1개월(30일) 경과 시 예치금 환불 자동 "가능" 처리
+    print("[Batch] Checking refund eligibility for members...")
+    today_date = datetime.now()
+    for idx, member in enumerate(members):
+        if str(member.get("상태", "")) != "활동":
+            continue
+            
+        join_date_str = str(member.get("가입일자", "")).strip()
+        refund_status = str(member.get("예치금환불", "")).strip()
+        
+        if join_date_str and refund_status != "가능":
+            try:
+                join_date = datetime.strptime(join_date_str, "%Y-%m-%d")
+                if (today_date - join_date).days >= 30:
+                    row_idx = idx + 2
+                    # 예치금환불은 12번째 열(L열)
+                    sheets_client.update_cell("Member_Master", row_idx, 12, "가능")
+                    print(f"   -> ✔️ [업데이트] {member.get('닉네임')}님 가입 후 30일 경과 (예치금환불: 가능)")
+            except ValueError:
+                pass
+
     ended_at = datetime.now()
     print(f"[Batch] Processed Absences: {processed_absent}")
     print(f"[Batch] Failed Updates: {failed_updates}")

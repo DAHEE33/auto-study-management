@@ -333,7 +333,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 "⚠️ 이미 사용 중인 닉네임입니다.\n"
                 "다른 닉네임으로 다시 입력해 주세요."
             )
-        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "-"]
+        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "-", target_date, "불가"]
         append_ok = sheets_client.append_row("Member_Master", new_row)
         if not append_ok:
             print(f"[{request_id}] ❌ 회원가입 append_row 실패 userkey={userkey}, nickname={target_nick}")

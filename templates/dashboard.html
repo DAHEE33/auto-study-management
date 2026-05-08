@@ -471,5 +471,46 @@
 
 </div>
 
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const myNickname = "{{ my_stats.nickname }}";
+    if (!myNickname) return;
+
+    const headers = document.querySelectorAll('.matrix-container th');
+    let targetTh = null;
+    let targetIndex = -1;
+    headers.forEach((th, index) => {
+        if (th.textContent.trim() === myNickname) {
+            targetTh = th;
+            targetIndex = index;
+        }
+    });
+
+    if (targetTh) {
+        const container = document.querySelector('.matrix-container');
+        // 내 컬럼이 화면 중앙에 오도록 스크롤 위치 계산
+        const scrollPos = targetTh.offsetLeft - (container.clientWidth / 2) + (targetTh.clientWidth / 2);
+        
+        // 부드럽게 가로 스크롤 이동
+        setTimeout(() => {
+            container.scrollTo({ left: Math.max(0, scrollPos), behavior: 'smooth' });
+        }, 100);
+
+        // 내 열 시각적 강조 (이름 및 배경색)
+        targetTh.style.color = "var(--accent)";
+        targetTh.style.fontWeight = "800";
+        targetTh.style.borderBottom = "2px solid var(--accent)";
+        
+        const rows = document.querySelectorAll('.matrix-container tbody tr');
+        rows.forEach(row => {
+            const cells = row.querySelectorAll('td');
+            if (cells[targetIndex]) {
+                cells[targetIndex].style.backgroundColor = "rgba(139, 92, 246, 0.1)"; // 보라색(accent) 아주 연하게
+            }
+        });
+    }
+});
+</script>
+
 </body>
 </html>
