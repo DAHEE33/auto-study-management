@@ -306,6 +306,9 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
 
     member_record = sheets_client.get_member_by_userkey(userkey)
     
+    now = datetime.now()
+    target_date = check_in_engine.get_target_date(now)
+
     if not member_record:
         # [자동 회원가입 로직]
         # 이미지를 보냈거나, 텍스트가 너무 길거나(15자), 하단 퀵리플라이 버튼을 누른 경우 가입 안내 문구 발송
@@ -420,9 +423,6 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     if utterance == "목표 변경":
         user_states[userkey] = {"type": "목표변경", "expires": datetime.now() + timedelta(minutes=5)}
         return build_kakao_response("🎯 목표시간 설정을 원하시나요?\n\n채팅창에 변경하실 시간과 함께 아래 양식으로 입력해 주세요!\n\n(예시)\n👉 목표변경 2시간 30분\n👉 목표시간 120\n👉 목표변경 3시간")
-
-    now = datetime.now()
-    target_date = check_in_engine.get_target_date(now)
 
     # 3. 사용자 발화(또는 Block명)로 인증/휴무 종류 분기 처리
     block_name = user_request.get("block", {}).get("name", "")
