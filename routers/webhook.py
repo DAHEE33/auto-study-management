@@ -581,10 +581,14 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 target_override, pending_deduct_amt, refund_msg, now
             )
             
+            import urllib.parse
+            encoded_nick = urllib.parse.quote(nickname)
+            dashboard_url = f"{request.base_url}dashboard?user={encoded_nick}"
+
             reply_text = (
-                f"📸 [{auth_type}] 인증 사진이 접수되었습니다!\n\n"
-                f"OCR 분석과 시트 기록이 자동으로 진행됩니다.\n"
-                f"(약 10~15초 소요, 결과는 대시보드에서 확인 가능)"
+                f"📸 [{auth_type}] 인증 사진 접수 완료!\n\n"
+                f"OCR 분석 중입니다. 약 15초 후 아래 링크에서 결과를 확인하세요.\n\n"
+                f"🔗 {dashboard_url}"
             )
             if refund_msg:
                 reply_text += f"\n{refund_msg}"
