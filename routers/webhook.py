@@ -92,6 +92,22 @@ def is_duplicate_nickname(userkey: str, nickname: str) -> bool:
             return True
     return False
 
+
+def activate_member_if_needed(row_idx: int, member_record: dict, source: str = "unknown") -> None:
+    """
+    신규 가입자를 '대기'로 두고, 첫 인증/휴무 사용 시점에 '활동'으로 전환합니다.
+    """
+    current_status = str(member_record.get("상태", "")).strip()
+    if current_status == "활동":
+        return
+
+    ok = sheets_client.update_cell("Member_Master", row_idx, 3, "활동")
+    if ok:
+        member_record["상태"] = "활동"
+        print(f"✅ [{source}] 멤버 상태 전환: row={row_idx}, {current_status} -> 활동")
+    else:
+        print(f"❌ [{source}] 멤버 상태 전환 실패: row={row_idx}, from={current_status}")
+
 def update_sheets_in_background(request_id: str, row_idx: int, col_updates: list, log_row: list):
     """구글 시트 업데이트를 백그라운드에서 실행하여 카카오 응답 지연(5초 타임아웃) 방지"""
     try:
@@ -129,6 +145,16 @@ def process_photo_auth_in_background(
         from services.check_in_engine import check_in_engine as bg_checkin
 
         print(f"[{request_id}] 🔄 [백그라운드-사진인증] 처리 시작: {nickname} ({auth_type})")
+
+        # 첫 인증 시도를 시작한 시점에 대기 -> 활동 전환
+        current_status = str(member_record.get("상태", "")).strip()
+        if current_status != "활동":
+            status_ok = bg_sheets.update_cell("Member_Master", row_idx, 3, "활동")
+            if status_ok:
+                member_record["상태"] = "활동"
+                print(f"[{request_id}] ✅ [백그라운드-사진인증] 상태 전환: {current_status} -> 활동")
+            else:
+                print(f"[{request_id}] ❌ [백그라운드-사진인증] 상태 전환 실패 (row={row_idx})")
 
         # 1. 이미지 다운로드 (동기 방식으로 변환)
         import httpx
@@ -336,7 +362,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 "⚠️ 이미 사용 중인 닉네임입니다.\n"
                 "다른 닉네임으로 다시 입력해 주세요."
             )
-        new_row = [target_nick, userkey, "활동", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "-", target_date, "불가"]
+        new_row = [target_nick, userkey, "대기", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "-", target_date, "불가"]
         append_ok = sheets_client.append_row("Member_Master", new_row)
         if not append_ok:
             print(f"[{request_id}] ❌ 회원가입 append_row 실패 userkey={userkey}, nickname={target_nick}")
@@ -517,6 +543,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             
             # DB 잔여량 차감 반영
             sheets_client.update_cell("Member_Master", row_idx, col_idx, new_val)
+            activate_member_if_needed(row_idx, member_record, source=f"{leave_type}_request")
             
             # 로그 반영 (당일 기록 Override 적용)
             log_row = [target_date, nickname, leave_type, "PASS", "-", "0", "-", "0", "-"]
@@ -541,6 +568,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 # '대기', 승인여부 'N' (기존 기록이 있다면 덮어쓰기)
                 log_row = [target_date, nickname, "특휴", "대기", "N", "-", "-", "0", drive_url]
                 sheets_client.upsert_daily_log(log_row)
+                activate_member_if_needed(row_idx, member_record, source="special_off_submit")
                 reply_text = "🏥 특휴 증빙 사진이 정상 접수되었습니다. 방장 확인(승인) 전까지는 대기 상태가 유지됩니다." + refund_msg
             except Exception as e:
                 reply_text = f"이미지 업로드 중 에러 발생: {e}"
