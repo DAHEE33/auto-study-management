@@ -101,6 +101,14 @@ def activate_member_if_needed(row_idx: int, member_record: dict, source: str = "
     if current_status == "활동":
         return
 
+    # 예치금 소진자는 자동 복귀시키지 않습니다. (관리자 수동 복귀)
+    if current_status == "예치금 소진":
+        return
+
+    # 자동 전환은 신규 가입 대기 상태에서만 허용합니다.
+    if current_status != "대기":
+        return
+
     ok = sheets_client.update_cell("Member_Master", row_idx, 3, "활동")
     if ok:
         member_record["상태"] = "활동"
@@ -148,7 +156,7 @@ def process_photo_auth_in_background(
 
         # 첫 인증 시도를 시작한 시점에 대기 -> 활동 전환
         current_status = str(member_record.get("상태", "")).strip()
-        if current_status != "활동":
+        if current_status == "대기":
             status_ok = bg_sheets.update_cell("Member_Master", row_idx, 3, "활동")
             if status_ok:
                 member_record["상태"] = "활동"
@@ -228,6 +236,8 @@ def process_photo_auth_in_background(
             old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
             new_deposit = old_deposit + penalty
             col_updates.append((8, str(new_deposit)))
+            if new_deposit <= 0:
+                col_updates.append((3, "예치금 소진"))
 
         dur_str = f"{duration//60}시간 {duration%60}분"
         tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
@@ -377,6 +387,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         
     row_idx = member_record.get("_row_index", -1)
     nickname = str(member_record.get("닉네임", "")).strip()
+    member_status = str(member_record.get("상태", "")).strip()
 
     # [중요] 기존에 빈 닉네임으로 등록된 사용자는 다른 기능 진입 전에 닉네임부터 강제 등록
     if not nickname:
@@ -459,6 +470,12 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     is_special_off = "특휴" in utterance or "특휴" in block_name
     is_status = "내 현황" in utterance or "현황" in block_name
     is_auth = utterance == "인증"
+
+    if member_status == "예치금 소진" and not is_status:
+        return build_kakao_response(
+            "⚠️ 현재 상태는 '예치금 소진'입니다.\n"
+            "추가 예치금 입금 후 관리자 확인이 완료되어야 스터디 참여가 가능합니다."
+        )
     
     # --- [핵심] 명시적 버튼 클릭 시 이전 상태 무조건 초기화 ---
     # 유저가 새로운 의도를 표명했으므로, 이전에 기억해둔 상태(반휴 대기, 특휴 대기 등)를 즉시 삭제합니다.
