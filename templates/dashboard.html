@@ -425,11 +425,11 @@
                         
                         <td>
                             <!-- 로직에 따른 배지 렌더링 -->
-                            {% if cell.status == "-" %}
-                                <div class="badge empty" data-tooltip="기록 없음">-</div>
-                            
-                            {% elif cell.penalty < 0 %}
+                            {% if cell.penalty < 0 %}
                                 <div class="badge fail" data-tooltip="{{ cell.tooltip }}">{{ cell.penalty }}</div>
+                            
+                            {% elif cell.status == "-" %}
+                                <div class="badge empty" data-tooltip="기록 없음">-</div>
                                 
                             {% elif cell.type == "주휴" or cell.type == "월휴" or cell.type == "특휴" %}
                                 <div class="badge leave" data-tooltip="{{ cell.tooltip }}">🏖️</div>

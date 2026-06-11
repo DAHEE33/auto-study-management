@@ -148,7 +148,10 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
             
             # 툴팁
             if pen < 0:
-                tooltip = f"{status}({pen}원) | {dur}"
+                penalty_label = status if status and status != "-" else ltype
+                if not penalty_label:
+                    penalty_label = "벌점"
+                tooltip = f"{penalty_label}({pen}원) | {dur}"
             elif ltype in ["주휴", "월휴", "특휴"]:
                 tooltip = f"[{ltype}]"
             elif ltype == "반휴":
