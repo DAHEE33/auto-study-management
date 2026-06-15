@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 from typing import List, Dict
 
 class SettlementEngine:
@@ -32,47 +33,94 @@ class SettlementEngine:
     def generate_weekly_report(self, start_date: str, end_date: str, daily_logs: List[Dict], master_members: List[Dict], admin_notice: str = "") -> str:
         """
         주간 결산 템플릿 생성기. (매주 토요일 정오 호출용)
-        - 배분: (총 벌금) / (벌금 0원 성실 멤버 수)
-        - 상금 대상, 예치금 경고 알림 등 포괄
+        - 배분: (총 벌금) / (벌금 0원 + 주 4일 이상 참여 멤버 수)
+        - 벌금 대상, 예치금 소진 안내를 함께 출력
         """
-        total_penalty_accumulated = 0
-        sincere_members = []
-        member_penalties = {m['닉네임']: 0 for m in master_members if str(m['상태']) == '활동'}
-        
-        # 1. 일주일치 로그에서 벌금 집계 (실제로는 date_string 필터링 필요)
-        for log in daily_logs:
-            try:
-                penalty_val = int(str(log.get('벌금액', '0')).replace(',', ''))
-            except:
-                penalty_val = 0
-                
-            nick = log.get('닉네임')
-            if nick in member_penalties:
-                if penalty_val < 0:
-                    member_penalties[nick] += abs(penalty_val)
-                    total_penalty_accumulated += abs(penalty_val)
-        
-        # 2. 성실 멤버 산정
-        for nick, pen_amt in member_penalties.items():
-            if pen_amt == 0:
-                sincere_members.append(nick)
-                
-        # 3. 1/n 보상금액
-        reward_per_user = 0
-        if total_penalty_accumulated > 0 and len(sincere_members) > 0:
-            reward_per_user = total_penalty_accumulated // len(sincere_members)
+        def _to_int(raw, default=0):
+            txt = str(raw).replace(",", "").strip()
+            if txt.startswith("-"):
+                return int(txt) if txt[1:].isdigit() else default
+            return int(txt) if txt.isdigit() else default
 
-        # 4. 결산 텍스트 조립
-        report = f"[Study-Sync 주간 결산] 📅 {start_date} ~ {end_date}\n\n"
-        report += "이번 주도 고생 많으셨습니다!\n정산 결과를 발표합니다.\n\n"
-        report += f"💰 벌금 합계: {total_penalty_accumulated:,}원\n"
-        report += f"💰 1/n 배분액: +{reward_per_user:,}원 (성실멤버 {len(sincere_members)}명)\n\n"
-        
-        report += "📢 관리자 공지사항:\n"
-        report += "-" * 25 + "\n"
-        report += f"{admin_notice if admin_notice else '특별한 공지사항이 없습니다.'}\n"
-        report += "-" * 25 + "\n"
-        
-        return report
+        member_penalties = {}
+        member_participation_days = {}
+        for member in master_members:
+            nick = str(member.get("닉네임", "")).strip()
+            status = str(member.get("상태", "")).strip()
+            if not nick or status != "활동":
+                continue
+            member_penalties[nick] = 0
+            member_participation_days[nick] = set()
+
+        participation_types = {"일반", "반휴", "주휴", "월휴", "특휴"}
+
+        for log in daily_logs:
+            nick = str(log.get("닉네임", "")).strip()
+            if nick not in member_penalties:
+                continue
+
+            date_str = str(log.get("날짜", "")).strip()
+            log_type = str(log.get("유형", "")).strip()
+            is_participation = log_type in participation_types
+            if date_str and is_participation:
+                member_participation_days[nick].add(date_str)
+
+            penalty_val = _to_int(log.get("벌금액", "0"), default=0)
+            if penalty_val < 0:
+                member_penalties[nick] += abs(penalty_val)
+
+        total_penalty_accumulated = sum(member_penalties.values())
+
+        reward_targets = []
+        for nick, penalty_amount in member_penalties.items():
+            participation_days = len(member_participation_days.get(nick, set()))
+            if penalty_amount == 0 and participation_days >= 4:
+                reward_targets.append(nick)
+
+        reward_per_user = 0
+        if total_penalty_accumulated > 0 and reward_targets:
+            reward_per_user = total_penalty_accumulated // len(reward_targets)
+
+        penalty_targets = []
+        for nick, amount in member_penalties.items():
+            if amount > 0:
+                penalty_targets.append(f"{nick}(-{amount:,})")
+
+        depleted_targets = []
+        for member in master_members:
+            nick = str(member.get("닉네임", "")).strip()
+            if not nick:
+                continue
+            status = str(member.get("상태", "")).strip()
+            deposit = _to_int(member.get("예치금", "0"), default=0)
+            if status == "예치금 소진" or deposit <= 0:
+                depleted_targets.append(f"{nick}({deposit:,})")
+
+        try:
+            end_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            end_obj = datetime.now().date()
+        days_until_sunday = (6 - end_obj.weekday()) % 7
+        sunday_deadline = end_obj + timedelta(days=days_until_sunday)
+        deadline_text = f"{sunday_deadline.strftime('%Y-%m-%d')}(일)"
+
+        report_lines = [
+            f"[주간 정산 안내] 📅 {start_date} ~ {end_date}",
+            "",
+            "1) 이번주 벌금 요약",
+            f"- 이번 주 벌금: {total_penalty_accumulated:,}원 / 벌금 없는 사람들 {len(reward_targets)}명 (주 4일 이상 참여 기준)",
+            f"- 1/n 배분액: +{reward_per_user:,}원",
+            f"- 벌금 대상자: {', '.join(penalty_targets) if penalty_targets else '없음'}",
+            "- 상금은 상황에 따라 변경될 수도 있습니다.",
+            "",
+            "2) 예치금 추가 요청",
+            f"- 대상자(예치금 소진): {', '.join(depleted_targets) if depleted_targets else '없음'}",
+            f"- 위 대상자는 {deadline_text}까지 추가 예치금 입금 부탁드립니다.(이후 스터디 종료로 간주)",
+        ]
+
+        if admin_notice:
+            report_lines.extend(["", f"📢 관리자 공지: {admin_notice}"])
+
+        return "\n".join(report_lines)
 
 settlement_engine = SettlementEngine()

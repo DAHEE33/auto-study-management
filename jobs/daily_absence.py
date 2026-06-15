@@ -80,6 +80,14 @@ def run_daily_absence_job():
                 failed_updates += 1
                 print(f"❌ [Batch] 예치금 차감 실패: nickname={nickname}, row={row_idx}, old={old_deposit}, new={new_deposit}")
                 continue
+
+            if new_deposit <= 0:
+                status_ok = sheets_client.update_cell("Member_Master", row_idx, 3, "예치금 소진")
+                if status_ok:
+                    print(f"   -> ⚠️ [{nickname}] 예치금 소진 상태로 전환 (deposit={new_deposit})")
+                else:
+                    failed_updates += 1
+                    print(f"❌ [Batch] 상태 전환 실패: nickname={nickname}, row={row_idx}, status=예치금 소진")
             
             print(f"   -> ✔️ [처리 완료] {nickname}님 결석(-2000) 기록 확정 및 예치금 차감 완료")
             processed_absent += 1
