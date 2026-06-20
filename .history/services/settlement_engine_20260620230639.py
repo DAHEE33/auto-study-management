@@ -110,7 +110,7 @@ class SettlementEngine:
             "1) 이번주 벌금 요약",
             f"- 이번 주 벌금: {total_penalty_accumulated:,}원",
             f"- 예상 1/n 배분액: +{reward_per_user:,}원",
-            "- 상금은 상황에 따라 변경될 수도 있습니다." 
+            "- 상금은 상황에 따라 변경될 수도 있습니다."
         ]
 
         if admin_notice:

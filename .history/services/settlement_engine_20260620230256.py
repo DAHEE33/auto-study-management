@@ -108,9 +108,14 @@ class SettlementEngine:
             f"[주간 정산 안내] 📅 {start_date} ~ {end_date}",
             "",
             "1) 이번주 벌금 요약",
-            f"- 이번 주 벌금: {total_penalty_accumulated:,}원",
-            f"- 예상 1/n 배분액: +{reward_per_user:,}원",
-            "- 상금은 상황에 따라 변경될 수도 있습니다." 
+            f"- 이번 주 벌금: {total_penalty_accumulated:,}원 / 벌금 없는 사람들 {len(reward_targets)}명 (주 4일 이상 참여 기준)",
+            f"- 1/n 배분액: +{reward_per_user:,}원",
+            f"- 벌금 대상자: {', '.join(penalty_targets) if penalty_targets else '없음'}",
+            "- 상금은 상황에 따라 변경될 수도 있습니다.",
+            "",
+            "2) 예치금 추가 요청",
+            f"- 대상자(예치금 소진): {', '.join(depleted_targets) if depleted_targets else '없음'}",
+            "- 위 대상자는 각자 마감일 자정 전까지 추가 예치금 입금 부탁드립니다.(미입금 시 스터디 종료)",
         ]
 
         if admin_notice:

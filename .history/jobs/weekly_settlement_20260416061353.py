@@ -48,7 +48,7 @@ def run_weekly_settlement_job():
         end_date=end_date,
         daily_logs=filtered_logs,
         master_members=members,
-        admin_notice="이번 주도 모두 고생하셨습니다! 주말 잘 보내시고 담주에 뵙겠습니다."
+        admin_notice="이번 주도 모두 고생하셨습니다! 다음 주 월요일까지 정산액을 개인 입금/차감해 주세요."
     )
     
     print("\n" + "="*40)
