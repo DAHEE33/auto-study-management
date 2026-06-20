@@ -238,6 +238,7 @@ def process_photo_auth_in_background(
             col_updates.append((8, str(new_deposit)))
             if new_deposit <= 0:
                 col_updates.append((3, "예치금 소진"))
+                col_updates.append((13, now.strftime("%Y-%m-%d")))
 
         dur_str = f"{duration//60}시간 {duration%60}분"
         tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
@@ -372,7 +373,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 "⚠️ 이미 사용 중인 닉네임입니다.\n"
                 "다른 닉네임으로 다시 입력해 주세요."
             )
-        new_row = [target_nick, userkey, "대기", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "-", target_date, "불가"]
+        new_row = [target_nick, userkey, "대기", "2시간 0분", "0시간 0분", "1.0", "1", "10000", "-", "-", target_date, "불가", "-"]
         append_ok = sheets_client.append_row("Member_Master", new_row)
         if not append_ok:
             print(f"[{request_id}] ❌ 회원가입 append_row 실패 userkey={userkey}, nickname={target_nick}")
@@ -388,6 +389,19 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     row_idx = member_record.get("_row_index", -1)
     nickname = str(member_record.get("닉네임", "")).strip()
     member_status = str(member_record.get("상태", "")).strip()
+
+    if member_status == "예치금 소진":
+        depletion_date_str = str(member_record.get("예치금소진일자", "")).strip()
+        if depletion_date_str and depletion_date_str != "-":
+            try:
+                depletion_date = datetime.strptime(depletion_date_str, "%Y-%m-%d").date()
+                if datetime.now().date() > (depletion_date + timedelta(days=3)):
+                    end_ok = sheets_client.update_cell("Member_Master", row_idx, 3, "스터디 종료")
+                    if end_ok:
+                        member_record["상태"] = "스터디 종료"
+                        member_status = "스터디 종료"
+            except ValueError:
+                pass
 
     # [중요] 기존에 빈 닉네임으로 등록된 사용자는 다른 기능 진입 전에 닉네임부터 강제 등록
     if not nickname:
@@ -471,9 +485,29 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     is_status = "내 현황" in utterance or "현황" in block_name
     is_auth = utterance == "인증"
 
+    if member_status == "스터디 종료":
+        return build_kakao_response(
+            "⛔ 현재 상태는 '스터디 종료'입니다.\n"
+            "재참여가 필요하시면 관리자에게 문의해 주세요."
+        )
+
     if member_status == "예치금 소진" and not is_status:
+        depletion_date_str = str(member_record.get("예치금소진일자", "")).strip()
+        deadline_text = "-"
+        if depletion_date_str and depletion_date_str != "-":
+            try:
+                depletion_date = datetime.strptime(depletion_date_str, "%Y-%m-%d").date()
+                deadline_date = depletion_date + timedelta(days=3)
+                deadline_text = deadline_date.strftime("%Y-%m-%d")
+            except ValueError:
+                deadline_text = "-"
+
         return build_kakao_response(
             "⚠️ 현재 상태는 '예치금 소진'입니다.\n"
+            f"소진일: {depletion_date_str if depletion_date_str else '-'}\n"
+            f"입금 마감일: {deadline_text} (자정 전까지)\n"
+            "해당 날짜 안에 예치금을 입금해 주세요.\n"
+            "미입금 시 자동으로 스터디 종료 처리됩니다.\n"
             "추가 예치금 입금 후 관리자 확인이 완료되어야 스터디 참여가 가능합니다."
         )
     

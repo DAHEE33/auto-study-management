@@ -38,6 +38,36 @@ def run_daily_absence_job():
     # 3. 멤버 및 어제 자 로그 조회
     members = sheets_client.get_sheet_records("Member_Master")
     daily_logs = sheets_client.get_sheet_records("Daily_Log")
+
+    # 3-1. 예치금 소진 3일 경과자 자동 스터디 종료 처리
+    today_date = datetime.now().date()
+    for idx, member in enumerate(members):
+        status = str(member.get("상태", "")).strip()
+        if status != "예치금 소진":
+            continue
+
+        depletion_date_str = str(member.get("예치금소진일자", "")).strip()
+        row_idx = idx + 2
+
+        # 소진일자가 비어 있는 기존 데이터는 오늘로 보정해 유예 계산 기준을 맞춥니다.
+        if not depletion_date_str or depletion_date_str == "-":
+            sheets_client.update_cell("Member_Master", row_idx, 13, today_date.strftime("%Y-%m-%d"))
+            print(f"   -> ℹ️ [{member.get('닉네임')}] 예치금소진일자 누락 보정: {today_date.strftime('%Y-%m-%d')}")
+            continue
+
+        try:
+            depletion_date = datetime.strptime(depletion_date_str, "%Y-%m-%d").date()
+        except ValueError:
+            print(f"❌ [Batch] 예치금소진일자 파싱 실패: nickname={member.get('닉네임')}, value={depletion_date_str}")
+            continue
+
+        deadline_date = depletion_date + timedelta(days=3)
+        if today_date > deadline_date:
+            end_ok = sheets_client.update_cell("Member_Master", row_idx, 3, "스터디 종료")
+            if end_ok:
+                print(f"   -> ⛔ [{member.get('닉네임')}] 유예기간 만료로 스터디 종료 전환 (마감일={deadline_date})")
+            else:
+                print(f"❌ [Batch] 스터디 종료 전환 실패: nickname={member.get('닉네임')}, row={row_idx}")
     
     active_members = [m for m in members if str(m.get("상태", "")) == "활동"]
     print(f"[Batch] Active Members: {len(active_members)}")
@@ -83,11 +113,12 @@ def run_daily_absence_job():
 
             if new_deposit <= 0:
                 status_ok = sheets_client.update_cell("Member_Master", row_idx, 3, "예치금 소진")
-                if status_ok:
+                depletion_ok = sheets_client.update_cell("Member_Master", row_idx, 13, datetime.now().strftime("%Y-%m-%d"))
+                if status_ok and depletion_ok:
                     print(f"   -> ⚠️ [{nickname}] 예치금 소진 상태로 전환 (deposit={new_deposit})")
                 else:
                     failed_updates += 1
-                    print(f"❌ [Batch] 상태 전환 실패: nickname={nickname}, row={row_idx}, status=예치금 소진")
+                    print(f"❌ [Batch] 상태/소진일 전환 실패: nickname={nickname}, row={row_idx}, status_ok={status_ok}, depletion_ok={depletion_ok}")
             
             print(f"   -> ✔️ [처리 완료] {nickname}님 결석(-2000) 기록 확정 및 예치금 차감 완료")
             processed_absent += 1

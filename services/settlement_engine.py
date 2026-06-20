@@ -94,15 +94,15 @@ class SettlementEngine:
             status = str(member.get("상태", "")).strip()
             deposit = _to_int(member.get("예치금", "0"), default=0)
             if status == "예치금 소진" or deposit <= 0:
-                depleted_targets.append(f"{nick}({deposit:,})")
-
-        try:
-            end_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
-        except ValueError:
-            end_obj = datetime.now().date()
-        days_until_sunday = (6 - end_obj.weekday()) % 7
-        sunday_deadline = end_obj + timedelta(days=days_until_sunday)
-        deadline_text = f"{sunday_deadline.strftime('%Y-%m-%d')}(일)"
+                depletion_date_str = str(member.get("예치금소진일자", "")).strip()
+                deadline_text = "-"
+                if depletion_date_str and depletion_date_str != "-":
+                    try:
+                        depletion_date = datetime.strptime(depletion_date_str, "%Y-%m-%d").date()
+                        deadline_text = (depletion_date + timedelta(days=3)).strftime("%Y-%m-%d")
+                    except ValueError:
+                        deadline_text = "-"
+                depleted_targets.append(f"{nick}({deposit:,}, 마감:{deadline_text})")
 
         report_lines = [
             f"[주간 정산 안내] 📅 {start_date} ~ {end_date}",
@@ -115,7 +115,7 @@ class SettlementEngine:
             "",
             "2) 예치금 추가 요청",
             f"- 대상자(예치금 소진): {', '.join(depleted_targets) if depleted_targets else '없음'}",
-            f"- 위 대상자는 {deadline_text}까지 추가 예치금 입금 부탁드립니다.(이후 스터디 종료로 간주)",
+            "- 위 대상자는 각자 마감일 자정 전까지 추가 예치금 입금 부탁드립니다.(미입금 시 스터디 종료)",
         ]
 
         if admin_notice:
