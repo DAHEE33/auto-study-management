@@ -35,6 +35,70 @@ def parse_duration_to_min(dur_str: str) -> int:
 def format_min_to_str(total_min: int) -> str:
     return f"{total_min // 60}시간 {total_min % 60}분"
 
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+def get_monthly_leave_cap(target_date: str) -> float:
+    """
+    해당 target_date(YYYY-MM-DD)가 속한 월의 월휴 최대치를 반환합니다.
+    Admin_Config에 값이 없으면 기본 1.0을 사용합니다.
+    """
+    month_key = str(target_date).strip()[:7]
+    if len(month_key) != 7:
+        return 1.0
+
+    admin_rows = sheets_client.get_sheet_records("Admin_Config")
+    candidates = []
+    for row in admin_rows:
+        row_date = str(row.get("날짜", "")).strip()
+        row_event = str(row.get("이벤트 타입", "")).strip()
+        if row_date == month_key and row_event in {"월휴개수", "특휴개수"}:
+            candidates.append(row)
+
+    if not candidates:
+        return 1.0
+
+    latest = candidates[-1]
+    for key in ("월별월휴개수", "월별특휴개수", "목표시간 조정"):
+        raw = str(latest.get(key, "")).strip()
+        if not raw or raw == "-":
+            continue
+        try:
+            return max(0.0, float(int(float(raw))))
+        except ValueError:
+            continue
+    return 1.0
+
+def build_daily_log_row(
+    target_date: str,
+    nickname: str,
+    auth_type: str,
+    status_msg: str,
+    approval: str,
+    daily_time: str,
+    total_time: str,
+    penalty: int,
+    image_id: str,
+    weekly_deduct: float = 0.0,
+    monthly_deduct: float = 0.0,
+) -> list:
+    return [
+        target_date,
+        nickname,
+        auth_type,
+        status_msg,
+        approval,
+        daily_time,
+        total_time,
+        str(penalty),
+        image_id,
+        f"{weekly_deduct:.1f}",
+        f"{monthly_deduct:.1f}",
+    ]
+
 router = APIRouter(prefix="/webhook", tags=["Webhook"])
 
 # 봇이 사용자 요청 맥락을 기억하기 위한 상태 저장소 (메모리 방식)
@@ -221,7 +285,19 @@ def process_photo_auth_in_background(
         if not end_time or duration == 0:
             print(f"[{request_id}] ❌ [백그라운드-사진인증] OCR 실패 (시간 정보 미발견)")
             # OCR 실패해도 시트에 기록은 남김
-            log_row = [target_date, nickname, auth_type, "OCR실패", "-", "-", "-", "0", drive_url]
+            log_row = build_daily_log_row(
+                target_date=target_date,
+                nickname=nickname,
+                auth_type=auth_type,
+                status_msg="OCR실패",
+                approval="-",
+                daily_time="-",
+                total_time="-",
+                penalty=0,
+                image_id=drive_url,
+                weekly_deduct=0.0,
+                monthly_deduct=0.0,
+            )
             bg_sheets.upsert_daily_log(log_row)
             return
 
@@ -265,9 +341,11 @@ def process_photo_auth_in_background(
 
         # 6. 시트 업데이트 수집
         col_updates = []
+        applied_weekly_deduct = 0.0
 
         if auth_type == "반휴" and not is_failed and not is_fake_date:
-            new_val = max(0.0, float(member_record.get("주간휴무", "0")) - pending_deduct_amt)
+            applied_weekly_deduct = pending_deduct_amt
+            new_val = max(0.0, float(member_record.get("주간휴무", "0")) - applied_weekly_deduct)
             col_updates.append((6, str(new_val)))
 
         if penalty < 0:
@@ -281,7 +359,19 @@ def process_photo_auth_in_background(
 
         dur_str = f"{duration//60}시간 {duration%60}분"
         tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
-        log_row = [target_date, nickname, auth_type, status_msg, "-", dur_str, tot_str, str(penalty), drive_url]
+        log_row = build_daily_log_row(
+            target_date=target_date,
+            nickname=nickname,
+            auth_type=auth_type,
+            status_msg=status_msg,
+            approval="-",
+            daily_time=dur_str,
+            total_time=tot_str,
+            penalty=penalty,
+            image_id=drive_url,
+            weekly_deduct=applied_weekly_deduct,
+            monthly_deduct=0.0,
+        )
 
         if not is_fake_date and total_mnts > 0:
             col_updates.append((5, format_min_to_str(total_mnts)))
@@ -307,28 +397,41 @@ def process_refund(target_date: str, nickname: str, member_record: dict, row_idx
         return refund_msg
 
     prev_type = today_auth.get("prev_type", "")
+    prev_weekly_deduct = safe_float(today_auth.get("prev_weekly_deduct", 0.0))
+    prev_monthly_deduct = safe_float(today_auth.get("prev_monthly_deduct", 0.0))
+    # 하위호환: 구버전 로그(차감 컬럼 없음)는 유형 기반으로 추정
+    if prev_weekly_deduct == 0 and prev_monthly_deduct == 0:
+        if prev_type == "주휴":
+            prev_weekly_deduct = 1.0
+        elif prev_type == "반휴":
+            prev_weekly_deduct = 0.5
+        elif prev_type == "월휴":
+            prev_monthly_deduct = 1.0
+    weekly_cap = 1.0
+    monthly_cap = get_monthly_leave_cap(target_date)
     
     # 1. 휴무 차감분 환불
-    if prev_type == "주휴":
-        old_val = float(str(member_record.get("주간휴무", "0")))
-        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_val + 1.0))
-        member_record["주간휴무"] = str(old_val + 1.0)
-        refund_msg += "\n(이전 주휴 차감분 1.0이 환불되었습니다.)"
-    elif prev_type == "반휴":
-        old_val = float(str(member_record.get("주간휴무", "0")))
-        sheets_client.update_cell("Member_Master", row_idx, 6, str(old_val + 0.5))
-        member_record["주간휴무"] = str(old_val + 0.5)
-        refund_msg += "\n(이전 반휴 차감분 0.5가 환불되었습니다.)"
-    elif prev_type == "월휴":
-        old_val = float(str(member_record.get("남은월휴", "0")))
-        sheets_client.update_cell("Member_Master", row_idx, 7, str(old_val + 1.0))
-        member_record["남은월휴"] = str(old_val + 1.0)
-        refund_msg += "\n(이전 월휴 차감분 1.0이 환불되었습니다.)"
-    elif prev_type == "특휴":
+    if prev_weekly_deduct > 0:
+        old_val = safe_float(member_record.get("주간휴무", "0"))
+        refund_amount = min(prev_weekly_deduct, max(0.0, weekly_cap - old_val))
+        if refund_amount > 0:
+            new_val = old_val + refund_amount
+            sheets_client.update_cell("Member_Master", row_idx, 6, str(new_val))
+            member_record["주간휴무"] = str(new_val)
+            refund_msg += f"\n(이전 주간휴무 차감분 {refund_amount:.1f}이 환불되었습니다.)"
+    if prev_monthly_deduct > 0:
+        old_val = safe_float(member_record.get("남은월휴", "0"))
+        refund_amount = min(prev_monthly_deduct, max(0.0, monthly_cap - old_val))
+        if refund_amount > 0:
+            new_val = old_val + refund_amount
+            sheets_client.update_cell("Member_Master", row_idx, 7, str(new_val))
+            member_record["남은월휴"] = str(new_val)
+            refund_msg += f"\n(이전 월휴 차감분 {refund_amount:.1f}이 환불되었습니다.)"
+    if prev_type == "특휴":
         refund_msg += "\n(이전 특휴 신청 내역이 취소되었습니다.)"
 
     # 2. 벌금 환불
-    old_penalty = sheets_client.get_daily_penalty(target_date, nickname)
+    old_penalty = int(today_auth.get("prev_penalty", sheets_client.get_daily_penalty(target_date, nickname)))
     if old_penalty < 0:
         old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
         old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
@@ -633,7 +736,21 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             activate_member_if_needed(row_idx, member_record, source=f"{leave_type}_request")
             
             # 로그 반영 (당일 기록 Override 적용)
-            log_row = [target_date, nickname, leave_type, "PASS", "-", "0", "-", "0", "-"]
+            weekly_deduct = deduct_amt if leave_type == "주휴" else 0.0
+            monthly_deduct = deduct_amt if leave_type == "월휴" else 0.0
+            log_row = build_daily_log_row(
+                target_date=target_date,
+                nickname=nickname,
+                auth_type=leave_type,
+                status_msg="PASS",
+                approval="-",
+                daily_time="0",
+                total_time="-",
+                penalty=0,
+                image_id="-",
+                weekly_deduct=weekly_deduct,
+                monthly_deduct=monthly_deduct,
+            )
             sheets_client.upsert_daily_log(log_row)
             msg += refund_msg
             
@@ -653,7 +770,19 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 drive_url = image_url # 카카오 사진 원본 링크를 직접 사용 (구글 드라이브 업로드 생략)
                 
                 # '대기', 승인여부 'N' (기존 기록이 있다면 덮어쓰기)
-                log_row = [target_date, nickname, "특휴", "대기", "N", "-", "-", "0", drive_url]
+                log_row = build_daily_log_row(
+                    target_date=target_date,
+                    nickname=nickname,
+                    auth_type="특휴",
+                    status_msg="대기",
+                    approval="N",
+                    daily_time="-",
+                    total_time="-",
+                    penalty=0,
+                    image_id=drive_url,
+                    weekly_deduct=0.0,
+                    monthly_deduct=0.0,
+                )
                 sheets_client.upsert_daily_log(log_row)
                 activate_member_if_needed(row_idx, member_record, source="special_off_submit")
                 reply_text = "🏥 특휴 증빙 사진이 정상 접수되었습니다. 방장 확인(승인) 전까지는 대기 상태가 유지됩니다." + refund_msg

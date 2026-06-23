@@ -5,6 +5,12 @@ import re
 from typing import List, Dict, Optional
 import time
 
+DAILY_LOG_HEADERS = [
+    "날짜", "닉네임", "유형", "판정", "승인여부(특휴시)",
+    "당일시간", "사진누적", "벌금액", "이미지ID",
+    "차감주휴", "차감월휴"
+]
+
 
 class SheetReadError(Exception):
     """Raised when sheet read fails even after retries."""
@@ -155,7 +161,7 @@ class GoogleSheetsClient:
         """
         Daily_Log 시트에 대해 같은 날짜, 같은 닉네임이 존재하면 해당 행을 덮어쓰고,
         존재하지 않으면 맨 아래에 새 행을 추가(append)합니다.
-        row_data: [Date, Nickname, Type, Result, Approval, DailyTime, TotalTime, Penalty, ImageID]
+        row_data: [Date, Nickname, Type, Result, Approval, DailyTime, TotalTime, Penalty, ImageID, WeeklyDeduct, MonthlyDeduct]
         """
         self.clear_cache("Daily_Log")
         if self.is_mock:
@@ -167,6 +173,11 @@ class GoogleSheetsClient:
             target_nickname = str(row_data[1])
             
             worksheet = self.spreadsheet.worksheet("Daily_Log")
+            header = worksheet.row_values(1)
+            expected_len = len(header) if header else len(DAILY_LOG_HEADERS)
+            normalized_row = list(row_data[:expected_len])
+            if len(normalized_row) < expected_len:
+                normalized_row.extend([""] * (expected_len - len(normalized_row)))
             records = worksheet.get_all_records()
             
             for idx, row in enumerate(records):
@@ -175,14 +186,14 @@ class GoogleSheetsClient:
                     row_idx = idx + 2
                     
                     # 해당 범위(A열~마지막 열) 덮어쓰기
-                    end_col_letter = chr(ord('A') + len(row_data) - 1)
+                    end_col_letter = chr(ord('A') + expected_len - 1)
                     range_addr = f"A{row_idx}:{end_col_letter}{row_idx}"
-                    worksheet.update(range_addr, [row_data])
+                    worksheet.update(range_addr, [normalized_row])
                     print(f"🔄 Daily_Log 행 덮어쓰기(Override) 완료: {target_nickname} ({target_date})")
                     return True
                     
             # 일치하는 행이 없으면 추가
-            worksheet.append_row(row_data)
+            worksheet.append_row(normalized_row)
             print(f"➕ Daily_Log 새 행 추가 완료: {target_nickname} ({target_date})")
             return True
             
@@ -257,12 +268,33 @@ class GoogleSheetsClient:
                     return {
                         "prev_duration": prev_duration,
                         "prev_status": str(row.get("판정", "")),
-                        "prev_type": str(row.get("유형", ""))
+                        "prev_type": str(row.get("유형", "")),
+                        "prev_penalty": self._parse_int(row.get("벌금액", 0)),
+                        "prev_weekly_deduct": self._parse_float(row.get("차감주휴", 0)),
+                        "prev_monthly_deduct": self._parse_float(row.get("차감월휴", 0)),
                     }
             return {}
         except Exception as e:
             print(f"Error fetching today auth history: {e}")
             return {}
+
+    def _parse_int(self, value, default: int = 0) -> int:
+        txt = str(value).replace(",", "").strip()
+        if not txt:
+            return default
+        try:
+            return int(float(txt))
+        except ValueError:
+            return default
+
+    def _parse_float(self, value, default: float = 0.0) -> float:
+        txt = str(value).strip()
+        if not txt:
+            return default
+        try:
+            return float(txt)
+        except ValueError:
+            return default
 
     def setup_initial_data(self):
         """실제 구글 시트가 비어있을 경우 헤더와 초기 데이터를 최신 아키텍처 기준으로 주입합니다."""
@@ -336,10 +368,20 @@ class GoogleSheetsClient:
             val2 = ws_log.get("A1")
             if not val2 or not val2[0]:
                 ws_log.update("A1", [
-                    ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간", "사진누적", "벌금액", "이미지ID"],
-                    ["2026-04-15", "dev_user", "일반", "PASS", "-", "135", "15,600", "0", "drive_id_1"]
+                    DAILY_LOG_HEADERS,
+                    ["2026-04-15", "dev_user", "일반", "PASS", "-", "135", "15,600", "0", "drive_id_1", "0", "0"]
                 ])
                 print("✔️ 'Daily_Log' 시트에 기초 데이터 삽입 완료")
+            else:
+                log_headers = ws_log.row_values(1)
+                required_log_headers = ["차감주휴", "차감월휴"]
+                missing_log_headers = [h for h in required_log_headers if h not in log_headers]
+                if missing_log_headers:
+                    ws_log.add_cols(len(missing_log_headers))
+                    log_headers.extend(missing_log_headers)
+                    end_col_letter = chr(ord('A') + len(log_headers) - 1)
+                    ws_log.update(f"A1:{end_col_letter}1", [log_headers])
+                    print(f"✔️ 'Daily_Log' 시트 컬럼 추가 완료: {', '.join(missing_log_headers)}")
 
             # 3. Admin_Config 세팅
             try:

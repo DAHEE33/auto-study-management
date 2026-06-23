@@ -92,7 +92,7 @@ def run_daily_absence_job():
             print(f"⚠️ [{nickname}] 님은 {target_date} 로그 유효 기록이 없습니다. (결석 처리)")
             
             # Daily Log 기록
-            penalty_row = [target_date, nickname, "결석", "-", "-", "0시간 0분", "0시간 0분", "-2000", "-"]
+            penalty_row = [target_date, nickname, "결석", "-", "-", "0시간 0분", "0시간 0분", "-2000", "-", "0", "0"]
             append_ok = sheets_client.append_row("Daily_Log", penalty_row)
             if not append_ok:
                 failed_updates += 1
