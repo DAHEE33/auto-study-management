@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 class SettlementEngine:
     def __init__(self):
@@ -30,7 +30,15 @@ class SettlementEngine:
                 
         return 0
 
-    def generate_weekly_report(self, start_date: str, end_date: str, daily_logs: List[Dict], master_members: List[Dict], admin_notice: str = "") -> str:
+    def generate_weekly_report(
+        self,
+        start_date: str,
+        end_date: str,
+        daily_logs: List[Dict],
+        master_members: List[Dict],
+        confirm_deadline_label: str,
+        extra_notices: Optional[List[str]] = None
+    ) -> str:
         """
         주간 결산 템플릿 생성기. (매주 토요일 정오 호출용)
         - 배분: (총 벌금) / (벌금 0원 + 주 4일 이상 참여 멤버 수)
@@ -107,14 +115,20 @@ class SettlementEngine:
         report_lines = [
             f"[주간 정산 안내] 📅 {start_date} ~ {end_date}",
             "",
+            f"+ 내현황 보기로 {confirm_deadline_label}까지 확인, 갠톡이나 단톡방에 요청 수정 요청 가능합니다",
+            "",
             "1) 이번주 벌금 요약",
             f"- 이번 주 벌금: {total_penalty_accumulated:,}원",
             f"- 예상 1/n 배분액: +{reward_per_user:,}원",
             "- 상금은 상황에 따라 변경될 수도 있습니다." 
         ]
 
-        if admin_notice:
-            report_lines.extend(["", f"📢 관리자 공지: {admin_notice}"])
+        notices = [n.strip() for n in (extra_notices or []) if str(n).strip() and str(n).strip() != "-"]
+        if notices:
+            for idx, notice in enumerate(notices, start=2):
+                report_lines.extend(["", f"{idx}) {notice}"])
+
+        report_lines.extend(["", "이번 한 주도 모두 수고하셨습니다💪"])
 
         return "\n".join(report_lines)
 

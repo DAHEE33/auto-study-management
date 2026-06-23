@@ -10,7 +10,7 @@ import re
 import traceback
 import uuid
 
-from integrations.google_sheets import sheets_client
+from integrations.google_sheets import sheets_client, SheetReadError
 from integrations.google_drive import drive_client
 from services.ocr_service import ocr_service
 from services.settlement_engine import settlement_engine
@@ -41,6 +41,7 @@ router = APIRouter(prefix="/webhook", tags=["Webhook"])
 # 형태: { "UserKey": {"type": "반휴" | "특휴", "expires": datetime_object} }
 user_states = {}
 RESERVED_NICK_INPUTS = {"인증", "반휴 인증", "주휴 사용", "월휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"}
+BUTTON_FALLBACK_HINT = "\n\n(버튼이 안 보이면 채팅창에 '인증' 또는 '반휴 인증'을 직접 입력해 주세요.)"
 
 def build_kakao_response(text: str) -> Dict[str, Any]:
     """카카오 i 챗봇 스펙에 맞춘 심플한 텍스트 응답 제네레이터"""
@@ -70,6 +71,44 @@ async def download_image(url: str) -> str:
     temp_file.write(resp.content)
     temp_file.close()
     return temp_file.name
+
+
+def extract_image_url(params: Dict[str, Any], user_request: Dict[str, Any], utterance: str) -> str:
+    """카카오 payload의 다양한 케이스에서 이미지 URL을 최대한 안정적으로 추출합니다."""
+    candidates = []
+
+    def _walk(obj: Any):
+        if isinstance(obj, dict):
+            for key, val in obj.items():
+                if key in {"origin", "value", "resolvedValue", "url", "imageUrl"} and isinstance(val, str):
+                    candidates.append(val)
+                _walk(val)
+        elif isinstance(obj, list):
+            for item in obj:
+                _walk(item)
+
+    _walk(params)
+    _walk(user_request.get("params", {}))
+    if utterance:
+        candidates.append(utterance)
+
+    for raw in candidates:
+        if "http" not in raw:
+            continue
+        cleaned = raw.strip()
+        if cleaned.startswith("List(") and cleaned.endswith(")"):
+            cleaned = cleaned[5:-1]
+
+        # payload 문자열 안에 URL이 섞여 있어도 추출할 수 있도록 정규식 보강
+        urls = re.findall(r"https?://[^\s,\)]+", cleaned)
+        for url in urls:
+            if "http" in url:
+                return url
+
+        if cleaned.startswith("http"):
+            return cleaned
+
+    return ""
 
 def get_nickname_validation_error(raw_nickname: str) -> str:
     nickname = raw_nickname.strip()
@@ -327,21 +366,18 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     print(f"► 수신 텍스트(utterance): {utterance}")
     print(f"====================================================\n")
 
-    # 2. 파라미터 또는 발화에서 이미지 URL 파싱 (미등록 유저 사진 유무를 빨리 알기 위해 위로 올림)
-    image_url = ""
-    for key, value in params.items():
-        if isinstance(value, dict) and value.get("origin"):
-            origin_val = value["origin"]
-            if "http" in origin_val:
-                if origin_val.startswith("List(") and origin_val.endswith(")"):
-                    origin_val = origin_val[5:-1]
-                image_url = origin_val
-                break
-    
-    if not image_url and utterance.startswith("http"):
-        image_url = utterance
+    # 2. 파라미터 또는 발화에서 이미지 URL 파싱 (케이스 확장)
+    image_url = extract_image_url(params, user_request, utterance)
 
-    member_record = sheets_client.get_member_by_userkey(userkey)
+    try:
+        member_record = sheets_client.get_member_by_userkey(userkey)
+    except SheetReadError as e:
+        print(f"[{request_id}] ❌ Member lookup failed: {e}")
+        return build_kakao_response(
+            "⏳ 현재 시트 조회가 지연되고 있어 잠시 후 다시 시도해 주세요.\n"
+            "10~20초 뒤 '인증' 또는 사진을 다시 보내주시면 바로 이어서 처리됩니다."
+            + BUTTON_FALLBACK_HINT
+        )
     
     now = datetime.now()
     target_date = check_in_engine.get_target_date(now)
@@ -632,7 +668,10 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 user_states[userkey] = {"type": "반휴", "expires": now + timedelta(minutes=10)}
                 reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요. (이제 텍스트 없이 사진만 보내도 됩니다!)"
             else:
-                reply_text = "🔥 타이머와 누적시간이 잘 보이는 [구루미 메인 화면] 캡처 사진을 전송해 주셔야 공부 판독이 가능합니다."
+                reply_text = (
+                    "🔥 타이머와 누적시간이 잘 보이는 [구루미 메인 화면] 캡처 사진을 전송해 주셔야 공부 판독이 가능합니다."
+                    + BUTTON_FALLBACK_HINT
+                )
         else:
             auth_type = "반휴" if is_half_off else "일반"
             target_override = None
@@ -668,6 +707,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 f"📸 [{auth_type}] 인증 사진 접수 완료!\n\n"
                 f"OCR 분석 중입니다. 약 15초 후 아래 링크에서 결과를 확인하세요.\n\n"
                 f"🔗 {dashboard_url}"
+                f"{BUTTON_FALLBACK_HINT}"
             )
             if refund_msg:
                 reply_text += f"\n{refund_msg}"

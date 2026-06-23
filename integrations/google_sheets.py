@@ -5,6 +5,11 @@ import re
 from typing import List, Dict, Optional
 import time
 
+
+class SheetReadError(Exception):
+    """Raised when sheet read fails even after retries."""
+    pass
+
 class GoogleSheetsClient:
     def __init__(self):
         self.scope = [
@@ -20,6 +25,7 @@ class GoogleSheetsClient:
         self._cache = {}
         self._cache_time = {}
         self.CACHE_TTL = 60  # 60초 캐싱 (카카오 5초 타임아웃 방어)
+        self.RETRY_DELAYS_SEC = [0.35, 0.9, 1.8]
         
         # 최신 설계 기준 모의 데이터
         self.mock_data = {
@@ -69,25 +75,54 @@ class GoogleSheetsClient:
         now = time.time()
         if sheet_name in self._cache and (now - self._cache_time.get(sheet_name, 0)) < self.CACHE_TTL:
             return self._cache[sheet_name]
-            
+
         try:
-            worksheet = self.spreadsheet.worksheet(sheet_name)
-            records = worksheet.get_all_records()
+            records = self._fetch_sheet_records_with_retry(sheet_name)
             self._cache[sheet_name] = records
             self._cache_time[sheet_name] = now
             return records
         except Exception as e:
             print(f"Error fetching sheet {sheet_name}: {e}")
+            # 조회 실패 시 직전 캐시라도 있으면 stale cache를 사용해 장애 전파를 줄입니다.
+            if sheet_name in self._cache:
+                print(f"⚠️ Using stale cache for {sheet_name}")
+                return self._cache[sheet_name]
             return []
 
     def get_member_by_userkey(self, userkey: str) -> Optional[Dict]:
         """UserKey를 사용하여 Member_Master에서 유저 정보를 조회하고, 시트 Row Index도 함께 반환합니다."""
-        records = self.get_sheet_records("Member_Master")
+        try:
+            records = self._fetch_sheet_records_with_retry("Member_Master")
+        except Exception as e:
+            raise SheetReadError(f"Member_Master read failed: {e}") from e
+
         for idx, row in enumerate(records):
             if str(row.get("UserKey", "")) == userkey:
                 row["_row_index"] = idx + 2  # 헤더가 1번 행이므로 +2
                 return row
         return None
+
+    def _fetch_sheet_records_with_retry(self, sheet_name: str) -> List[Dict]:
+        last_error = None
+        total_attempts = len(self.RETRY_DELAYS_SEC) + 1
+        for attempt in range(total_attempts):
+            try:
+                worksheet = self.spreadsheet.worksheet(sheet_name)
+                return worksheet.get_all_records()
+            except Exception as e:
+                last_error = e
+                is_last = attempt == total_attempts - 1
+                if is_last:
+                    break
+
+                delay = self.RETRY_DELAYS_SEC[attempt]
+                print(
+                    f"⚠️ Retry get_all_records({sheet_name}) after error: {e} "
+                    f"(attempt {attempt + 1}/{total_attempts}, sleep={delay}s)"
+                )
+                time.sleep(delay)
+
+        raise last_error
 
     def append_row(self, sheet_name: str, row_data: List):
         """Append a single row to a specific sheet."""
@@ -98,13 +133,23 @@ class GoogleSheetsClient:
             print(f"[MOCK] Appended to {sheet_name}: {row_data}")
             return True
             
-        try:
-            worksheet = self.spreadsheet.worksheet(sheet_name)
-            worksheet.append_row(row_data)
-            return True
-        except Exception as e:
-            print(f"Error appending to sheet {sheet_name}: {e}")
-            return False
+        total_attempts = len(self.RETRY_DELAYS_SEC) + 1
+        for attempt in range(total_attempts):
+            try:
+                worksheet = self.spreadsheet.worksheet(sheet_name)
+                worksheet.append_row(row_data)
+                return True
+            except Exception as e:
+                is_last = attempt == total_attempts - 1
+                if is_last:
+                    print(f"Error appending to sheet {sheet_name}: {e}")
+                    return False
+                delay = self.RETRY_DELAYS_SEC[attempt]
+                print(
+                    f"⚠️ Retry append_row({sheet_name}) after error: {e} "
+                    f"(attempt {attempt + 1}/{total_attempts}, sleep={delay}s)"
+                )
+                time.sleep(delay)
 
     def upsert_daily_log(self, row_data: List):
         """
@@ -152,13 +197,23 @@ class GoogleSheetsClient:
             print(f"[MOCK] Update {sheet_name} R{row}C{col} -> {val}")
             return True
 
-        try:
-            worksheet = self.spreadsheet.worksheet(sheet_name)
-            worksheet.update_cell(row, col, val)
-            return True
-        except Exception as e:
-            print(f"Error updating cell in {sheet_name}: {e}")
-            return False
+        total_attempts = len(self.RETRY_DELAYS_SEC) + 1
+        for attempt in range(total_attempts):
+            try:
+                worksheet = self.spreadsheet.worksheet(sheet_name)
+                worksheet.update_cell(row, col, val)
+                return True
+            except Exception as e:
+                is_last = attempt == total_attempts - 1
+                if is_last:
+                    print(f"Error updating cell in {sheet_name}: {e}")
+                    return False
+                delay = self.RETRY_DELAYS_SEC[attempt]
+                print(
+                    f"⚠️ Retry update_cell({sheet_name}) after error: {e} "
+                    f"(attempt {attempt + 1}/{total_attempts}, sleep={delay}s)"
+                )
+                time.sleep(delay)
 
     def get_daily_penalty(self, target_date: str, nickname: str) -> int:
         """당일 기록된 벌금이 있다면 반환합니다 (주휴/월휴로 덮어쓸 때 환불용)"""
@@ -295,23 +350,29 @@ class GoogleSheetsClient:
             val3 = ws_admin.get("A1")
             if not val3 or not val3[0]:
                 ws_admin.update("A1", [
-                    ["날짜", "이벤트 타입", "목표시간 조정", "주간 공지사항 (추가 멘트)", "월별특휴개수"],
+                    ["날짜", "이벤트 타입", "목표시간 조정", "주간 공지사항 (추가 멘트)", "월별특휴개수", "주간공지2", "주간공지3"],
                     ["2026-05-05", "자율참여", "0", "어린이날 즐겁게 보내세요!", "-"],
                     ["2026-05-01", "특휴개수", "0", "-", "3"]
                 ])
                 print("✔️ 'Admin_Config' 시트에 기초 데이터 삽입 완료")
             else:
                 admin_headers = ws_admin.row_values(1)
-                if "월별특휴개수" not in admin_headers:
-                    ws_admin.add_cols(1)
-                    admin_headers.append("월별특휴개수")
-                    ws_admin.update("A1:E1", [admin_headers])
+                required_admin_headers = ["월별특휴개수", "주간공지2", "주간공지3"]
+                missing_admin_headers = [h for h in required_admin_headers if h not in admin_headers]
+                if missing_admin_headers:
+                    ws_admin.add_cols(len(missing_admin_headers))
+                    admin_headers.extend(missing_admin_headers)
+                    end_col_letter = chr(ord('A') + len(admin_headers) - 1)
+                    ws_admin.update(f"A1:{end_col_letter}1", [admin_headers])
+
+                    # 기존 row의 월별특휴개수 공백은 '-'로 채워 관리합니다.
                     records = ws_admin.get_all_records()
+                    monthly_idx = admin_headers.index("월별특휴개수") + 1
                     for idx, row in enumerate(records, start=2):
                         current_val = str(row.get("월별특휴개수", "")).strip()
                         if not current_val:
-                            ws_admin.update_cell(idx, 5, "-")
-                    print("✔️ 'Admin_Config' 시트에 '월별특휴개수' 컬럼 추가 완료")
+                            ws_admin.update_cell(idx, monthly_idx, "-")
+                    print(f"✔️ 'Admin_Config' 시트 컬럼 추가 완료: {', '.join(missing_admin_headers)}")
                 
         except Exception as e:
             print(f"Error setting up initial data: {e}")

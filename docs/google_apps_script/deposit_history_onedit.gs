@@ -6,7 +6,7 @@
  * - 스터디 종료 후 Member_Master 행 삭제 여부와 무관하게 히스토리는 유지
  */
 const SETTINGS = {
-  MEMBER_SHEET: 'Member_Master',
+  MEMBER_SHEET_CANDIDATES: ['Member_Master', 'member_master'],
   HISTORY_SHEET: 'Deposit_History',
   HEADER_ROW: 1,
   REQUIRED_MEMBER_HEADERS: ['닉네임', 'UserKey', '예치금'],
@@ -29,7 +29,7 @@ function onEdit(e) {
 
   const range = e.range;
   const sheet = range.getSheet();
-  if (sheet.getName() !== SETTINGS.MEMBER_SHEET) return;
+  if (!isTargetMemberSheet_(sheet.getName())) return;
 
   // 여러 셀 동시 편집은 이력 왜곡 가능성이 있어 무시
   if (range.getNumRows() !== 1 || range.getNumColumns() !== 1) return;
@@ -57,19 +57,29 @@ function onEdit(e) {
   const eventType = classifyEvent_(oldDeposit, newDeposit);
   const editor = Session.getActiveUser().getEmail() || 'unknown';
 
-  const historySheet = ensureHistorySheet_(e.source);
-  historySheet.appendRow([
-    new Date(),
-    userKey,
-    nickname,
-    oldDeposit === null ? '' : oldDeposit,
-    newDeposit,
-    delta,
-    eventType,
-    range.getA1Notation(),
-    editor,
-    oldDeposit === null ? 'oldValue 미수신(복붙/수식 변경 가능)' : '자동기록',
-  ]);
+  try {
+    const historySheet = ensureHistorySheet_(e.source);
+    historySheet.appendRow([
+      new Date(),
+      userKey,
+      nickname,
+      oldDeposit === null ? '' : oldDeposit,
+      newDeposit,
+      delta,
+      eventType,
+      range.getA1Notation(),
+      editor,
+      oldDeposit === null ? 'oldValue 미수신(복붙/수식 변경 가능)' : '자동기록',
+    ]);
+  } catch (err) {
+    // 간단 트리거 에러는 사용자에게 토스트를 띄울 수 없어서 로그 시트에 남김
+    writeErrorLog_(e.source, err, {
+      sheetName: sheet.getName(),
+      a1: range.getA1Notation(),
+      value: e.value,
+      oldValue: e.oldValue,
+    });
+  }
 }
 
 function getHeaderMap_(sheet, headerRow) {
@@ -87,6 +97,13 @@ function getHeaderMap_(sheet, headerRow) {
 
 function hasRequiredHeaders_(headerMap, requiredHeaders) {
   return requiredHeaders.every((key) => !!headerMap[key]);
+}
+
+function isTargetMemberSheet_(name) {
+  const normalized = String(name || '').trim().toLowerCase();
+  return SETTINGS.MEMBER_SHEET_CANDIDATES.some(
+    (candidate) => String(candidate).trim().toLowerCase() === normalized
+  );
 }
 
 function parseAmount_(raw) {
@@ -113,4 +130,27 @@ function ensureHistorySheet_(spreadsheet) {
     history.getRange(1, 1, 1, SETTINGS.HISTORY_HEADERS.length).setValues([SETTINGS.HISTORY_HEADERS]);
   }
   return history;
+}
+
+function writeErrorLog_(spreadsheet, err, context) {
+  const logSheetName = 'Script_Error_Log';
+  let logSheet = spreadsheet.getSheetByName(logSheetName);
+  if (!logSheet) {
+    logSheet = spreadsheet.insertSheet(logSheetName);
+    logSheet.appendRow(['기록시각', '에러메시지', '컨텍스트(JSON)']);
+  }
+  logSheet.appendRow([
+    new Date(),
+    String(err && err.message ? err.message : err),
+    JSON.stringify(context || {}),
+  ]);
+}
+
+/**
+ * 수동 점검용: Apps Script 편집기에서 1회 실행하면
+ * Deposit_History 시트 생성/헤더 생성 여부를 확인할 수 있습니다.
+ */
+function testEnsureHistorySheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureHistorySheet_(ss);
 }
