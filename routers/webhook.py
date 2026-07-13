@@ -241,7 +241,7 @@ def update_sheets_in_background(request_id: str, row_idx: int, col_updates: list
 def process_photo_auth_in_background(
     request_id: str, image_url: str, auth_type: str, nickname: str,
     member_record: dict, row_idx: int, target_date: str,
-    target_override, pending_deduct_amt: float, refund_msg: str, now: datetime
+    target_override, pending_deduct_amt: float, now: datetime
 ):
     """
     [카카오 5초 타임아웃 완전 회피]
@@ -276,6 +276,10 @@ def process_photo_auth_in_background(
         temp_file.close()
         local_path = temp_file.name
         drive_url = image_url
+        previous_log_row = get_existing_daily_log_row(target_date, nickname, bg_sheets)
+        refund_updates, _, refunded_record = build_refund_member_updates(
+            target_date, nickname, member_record, bg_sheets
+        )
 
         # 2. OCR 파싱
         ocr_result = bg_ocr.extract_time_from_image(local_path)
@@ -298,11 +302,14 @@ def process_photo_auth_in_background(
                 weekly_deduct=0.0,
                 monthly_deduct=0.0,
             )
-            bg_sheets.upsert_daily_log(log_row)
+            if not commit_daily_log_and_member_updates(
+                bg_sheets, row_idx, member_record, log_row, refund_updates, previous_log_row
+            ):
+                print(f"[{request_id}] ❌ [백그라운드-사진인증] OCR 실패 로그/환불 반영 실패")
             return
 
         # 3. 목표시간 계산
-        bt_str = str(member_record.get("목표시간", "120")).strip()
+        bt_str = str(refunded_record.get("목표시간", "120")).strip()
         base_target = parse_duration_to_min(bt_str)
         if base_target == 0:
             base_target = 120
@@ -340,22 +347,22 @@ def process_photo_auth_in_background(
             status_msg = "PASS" if penalty == 0 else "경고/지각발송"
 
         # 6. 시트 업데이트 수집
-        col_updates = []
+        col_updates = list(refund_updates)
         applied_weekly_deduct = 0.0
 
         if auth_type == "반휴" and not is_failed and not is_fake_date:
             applied_weekly_deduct = pending_deduct_amt
-            new_val = max(0.0, float(member_record.get("주간휴무", "0")) - applied_weekly_deduct)
-            col_updates.append((6, str(new_val)))
+            new_val = max(0.0, float(refunded_record.get("주간휴무", "0")) - applied_weekly_deduct)
+            col_updates.append((6, "주간휴무", str(new_val)))
 
         if penalty < 0:
-            old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+            old_deposit_str = str(refunded_record.get("예치금", "0")).replace(",", "")
             old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
             new_deposit = old_deposit + penalty
-            col_updates.append((8, str(new_deposit)))
+            col_updates.append((8, "예치금", str(new_deposit)))
             if new_deposit <= 0:
-                col_updates.append((3, "예치금 소진"))
-                col_updates.append((13, now.strftime("%Y-%m-%d")))
+                col_updates.append((3, "상태", "예치금 소진"))
+                col_updates.append((13, "탈퇴일", now.strftime("%Y-%m-%d")))
 
         dur_str = f"{duration//60}시간 {duration%60}분"
         tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
@@ -374,12 +381,14 @@ def process_photo_auth_in_background(
         )
 
         if not is_fake_date and total_mnts > 0:
-            col_updates.append((5, format_min_to_str(total_mnts)))
+            col_updates.append((5, "누적시간", format_min_to_str(total_mnts)))
 
         # 7. 구글 시트 반영
-        for col_idx, val in col_updates:
-            bg_sheets.update_cell("Member_Master", row_idx, col_idx, val)
-        bg_sheets.upsert_daily_log(log_row)
+        if not commit_daily_log_and_member_updates(
+            bg_sheets, row_idx, member_record, log_row, col_updates, previous_log_row
+        ):
+            print(f"[{request_id}] ❌ [백그라운드-사진인증] 로그/회원정보 반영 실패")
+            return
 
         print(f"[{request_id}] ✅ [백그라운드-사진인증] 완료: {nickname} → {status_msg}, 벌금={penalty}")
         print(f"  - 금일공부: {dur_str}, 누적: {tot_str}, 목표: {final_target}분")
@@ -388,18 +397,38 @@ def process_photo_auth_in_background(
         print(f"[{request_id}] ❌ [백그라운드-사진인증] 에러 발생: {e}")
         print(traceback.format_exc())
 
-def process_refund(target_date: str, nickname: str, member_record: dict, row_idx: int) -> str:
-    """이전 인증/휴무가 있었다면 휴무 횟수와 벌금을 환불하고 결과 메시지를 반환합니다."""
-    from integrations.google_sheets import sheets_client
-    today_auth = sheets_client.get_today_auth_history(target_date, nickname)
+def get_existing_daily_log_row(target_date: str, nickname: str, sheet_client=sheets_client) -> list:
+    """기존 Daily_Log 행을 upsert_daily_log에 다시 넣을 수 있는 형태로 반환합니다."""
+    records = sheet_client.get_sheet_records("Daily_Log")
+    for row in records:
+        if str(row.get("날짜", "")) == target_date and str(row.get("닉네임", "")) == nickname:
+            return [
+                str(row.get("날짜", "")),
+                str(row.get("닉네임", "")),
+                str(row.get("유형", "")),
+                str(row.get("판정", "")),
+                str(row.get("승인여부(특휴시)", "")),
+                str(row.get("당일시간", "")),
+                str(row.get("사진누적", "")),
+                str(row.get("벌금액", "0")),
+                str(row.get("이미지ID", "")),
+                f"{safe_float(row.get('차감주휴', 0.0)):.1f}",
+                f"{safe_float(row.get('차감월휴', 0.0)):.1f}",
+            ]
+    return []
+
+def build_refund_member_updates(target_date: str, nickname: str, member_record: dict, sheet_client=sheets_client):
+    """기존 Daily_Log를 새 기록으로 덮을 때 필요한 Member_Master 환불 업데이트를 계산만 합니다."""
+    today_auth = sheet_client.get_today_auth_history(target_date, nickname)
     refund_msg = ""
+    preview_record = dict(member_record)
+    updates = []
     if not today_auth:
-        return refund_msg
+        return updates, refund_msg, preview_record
 
     prev_type = today_auth.get("prev_type", "")
     prev_weekly_deduct = safe_float(today_auth.get("prev_weekly_deduct", 0.0))
     prev_monthly_deduct = safe_float(today_auth.get("prev_monthly_deduct", 0.0))
-    # 하위호환: 구버전 로그(차감 컬럼 없음)는 유형 기반으로 추정
     if prev_weekly_deduct == 0 and prev_monthly_deduct == 0:
         if prev_type == "주휴":
             prev_weekly_deduct = 1.0
@@ -407,43 +436,112 @@ def process_refund(target_date: str, nickname: str, member_record: dict, row_idx
             prev_weekly_deduct = 0.5
         elif prev_type == "월휴":
             prev_monthly_deduct = 1.0
-    weekly_cap = 1.0
-    monthly_cap = get_monthly_leave_cap(target_date)
-    
-    # 1. 휴무 차감분 환불
+
     if prev_weekly_deduct > 0:
-        old_val = safe_float(member_record.get("주간휴무", "0"))
-        refund_amount = min(prev_weekly_deduct, max(0.0, weekly_cap - old_val))
+        old_val = safe_float(preview_record.get("주간휴무", "0"))
+        refund_amount = min(prev_weekly_deduct, max(0.0, 1.0 - old_val))
         if refund_amount > 0:
             new_val = old_val + refund_amount
-            sheets_client.update_cell("Member_Master", row_idx, 6, str(new_val))
-            member_record["주간휴무"] = str(new_val)
+            updates.append((6, "주간휴무", str(new_val)))
+            preview_record["주간휴무"] = str(new_val)
             refund_msg += f"\n(이전 주간휴무 차감분 {refund_amount:.1f}이 환불되었습니다.)"
+
     if prev_monthly_deduct > 0:
-        old_val = safe_float(member_record.get("남은월휴", "0"))
+        old_val = safe_float(preview_record.get("남은월휴", "0"))
+        monthly_cap = get_monthly_leave_cap(target_date)
         refund_amount = min(prev_monthly_deduct, max(0.0, monthly_cap - old_val))
         if refund_amount > 0:
             new_val = old_val + refund_amount
-            sheets_client.update_cell("Member_Master", row_idx, 7, str(new_val))
-            member_record["남은월휴"] = str(new_val)
+            updates.append((7, "남은월휴", str(new_val)))
+            preview_record["남은월휴"] = str(new_val)
             refund_msg += f"\n(이전 월휴 차감분 {refund_amount:.1f}이 환불되었습니다.)"
+
     if prev_type == "특휴":
         refund_msg += "\n(이전 특휴 신청 내역이 취소되었습니다.)"
 
-    # 2. 벌금 환불
-    old_penalty = int(today_auth.get("prev_penalty", sheets_client.get_daily_penalty(target_date, nickname)))
+    old_penalty = int(today_auth.get("prev_penalty", sheet_client.get_daily_penalty(target_date, nickname)))
     if old_penalty < 0:
-        old_deposit_str = str(member_record.get("예치금", "0")).replace(",", "")
+        old_deposit_str = str(preview_record.get("예치금", "0")).replace(",", "")
         old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
-        sheets_client.update_cell("Member_Master", row_idx, 8, str(old_deposit + abs(old_penalty)))
-        member_record["예치금"] = str(old_deposit + abs(old_penalty))
+        new_deposit = old_deposit + abs(old_penalty)
+        updates.append((8, "예치금", str(new_deposit)))
+        preview_record["예치금"] = str(new_deposit)
         refund_msg += f"\n(기존 패널티 {old_penalty}원이 예치금으로 반환되었습니다.)"
 
-    if refund_msg:
-        log_msg = refund_msg.replace('\n', ' ')
-        print(f"🔄 [{nickname}] 이전 기록({prev_type}) 덮어쓰기 환불 완료: {log_msg}")
+    return updates, refund_msg, preview_record
 
-    return refund_msg
+def rollback_member_updates(sheet_client, row_idx: int, member_record: dict, applied_updates: list):
+    for col_idx, key, old_val in reversed(applied_updates):
+        sheet_client.update_cell("Member_Master", row_idx, col_idx, old_val)
+        if key:
+            member_record[key] = old_val
+
+def apply_member_updates(sheet_client, row_idx: int, member_record: dict, updates: list):
+    applied_updates = []
+    for col_idx, key, new_val in updates:
+        old_val = str(member_record.get(key, "")) if key else ""
+        if not sheet_client.update_cell("Member_Master", row_idx, col_idx, new_val):
+            rollback_member_updates(sheet_client, row_idx, member_record, applied_updates)
+            return False, []
+        applied_updates.append((col_idx, key, old_val))
+        if key:
+            member_record[key] = str(new_val)
+    return True, applied_updates
+
+def commit_daily_log_and_member_updates(
+    sheet_client, row_idx: int, member_record: dict, log_row: list, member_updates: list, previous_log_row: list
+) -> bool:
+    """Daily_Log와 Member_Master를 함께 반영하고 실패 시 가능한 범위에서 이전 상태로 되돌립니다."""
+    if previous_log_row:
+        if not sheet_client.upsert_daily_log(log_row):
+            return False
+        ok, _ = apply_member_updates(sheet_client, row_idx, member_record, member_updates)
+        if not ok:
+            sheet_client.upsert_daily_log(previous_log_row)
+            return False
+        return True
+
+    ok, applied_updates = apply_member_updates(sheet_client, row_idx, member_record, member_updates)
+    if not ok:
+        return False
+    if not sheet_client.upsert_daily_log(log_row):
+        rollback_member_updates(sheet_client, row_idx, member_record, applied_updates)
+        return False
+    return True
+
+def preview_member_record_after_refund(target_date: str, nickname: str, member_record: dict) -> dict:
+    """이전 기록을 환불한다고 가정한 멤버 상태를 반환합니다. 시트에는 쓰지 않습니다."""
+    from integrations.google_sheets import sheets_client
+    today_auth = sheets_client.get_today_auth_history(target_date, nickname)
+    preview_record = dict(member_record)
+    if not today_auth:
+        return preview_record
+
+    prev_type = today_auth.get("prev_type", "")
+    prev_weekly_deduct = safe_float(today_auth.get("prev_weekly_deduct", 0.0))
+    prev_monthly_deduct = safe_float(today_auth.get("prev_monthly_deduct", 0.0))
+    if prev_weekly_deduct == 0 and prev_monthly_deduct == 0:
+        if prev_type == "주휴":
+            prev_weekly_deduct = 1.0
+        elif prev_type == "반휴":
+            prev_weekly_deduct = 0.5
+        elif prev_type == "월휴":
+            prev_monthly_deduct = 1.0
+
+    if prev_weekly_deduct > 0:
+        old_val = safe_float(preview_record.get("주간휴무", "0"))
+        refund_amount = min(prev_weekly_deduct, max(0.0, 1.0 - old_val))
+        if refund_amount > 0:
+            preview_record["주간휴무"] = str(old_val + refund_amount)
+
+    if prev_monthly_deduct > 0:
+        old_val = safe_float(preview_record.get("남은월휴", "0"))
+        monthly_cap = get_monthly_leave_cap(target_date)
+        refund_amount = min(prev_monthly_deduct, max(0.0, monthly_cap - old_val))
+        if refund_amount > 0:
+            preview_record["남은월휴"] = str(old_val + refund_amount)
+
+    return preview_record
 
 @router.post("")
 async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
@@ -721,19 +819,17 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         # [주휴 / 월휴] (버튼 클릭만으로 완료되는 로직)
         leave_type = "주휴" if is_week_off else "월휴"
         
-        # --- [당일 전환 로직] 이미 오늘 인증이 있었다면 이전 차감을 환불하고 전환 ---
-        refund_msg = process_refund(target_date, nickname, member_record, row_idx)
-        
-        is_approved, msg, deduct_amt = check_in_engine.process_leave_request(member_record, leave_type)
+        # --- [당일 전환 로직] 새 요청이 가능한 경우에만 이전 차감을 환불하고 전환 ---
+        validation_record = preview_member_record_after_refund(target_date, nickname, member_record)
+        is_approved, msg, deduct_amt = check_in_engine.process_leave_request(validation_record, leave_type)
         
         if is_approved:
+            previous_log_row = get_existing_daily_log_row(target_date, nickname)
+            refund_updates, refund_msg, refunded_record = build_refund_member_updates(target_date, nickname, member_record)
             col_idx = 6 if leave_type == "주휴" else 7 # 6: 주간휴무, 7: 남은월휴
-            old_val_str = member_record.get("주간휴무" if leave_type == "주휴" else "남은월휴", "0")
+            leave_key = "주간휴무" if leave_type == "주휴" else "남은월휴"
+            old_val_str = refunded_record.get(leave_key, "0")
             new_val = max(0.0, float(old_val_str) - deduct_amt)
-            
-            # DB 잔여량 차감 반영
-            sheets_client.update_cell("Member_Master", row_idx, col_idx, new_val)
-            activate_member_if_needed(row_idx, member_record, source=f"{leave_type}_request")
             
             # 로그 반영 (당일 기록 Override 적용)
             weekly_deduct = deduct_amt if leave_type == "주휴" else 0.0
@@ -751,8 +847,14 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 weekly_deduct=weekly_deduct,
                 monthly_deduct=monthly_deduct,
             )
-            sheets_client.upsert_daily_log(log_row)
-            msg += refund_msg
+            member_updates = refund_updates + [(col_idx, leave_key, str(new_val))]
+            if commit_daily_log_and_member_updates(
+                sheets_client, row_idx, member_record, log_row, member_updates, previous_log_row
+            ):
+                activate_member_if_needed(row_idx, member_record, source=f"{leave_type}_request")
+                msg += refund_msg
+            else:
+                msg = "시트 저장 중 오류가 발생했습니다. 기존 기록과 잔여 휴무는 변경하지 않았습니다. 잠시 후 다시 시도해 주세요."
             
         reply_text = msg
 
@@ -764,9 +866,8 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             reply_text = "🏥 특휴 처리를 위해 처방전이나 수험표 등의 증빙 사진을 지금 전송해 주세요."
         else:
             try:
-                # --- [당일 전환 로직] 특휴 제출 시에도 이전 기록/벌금 환불 ---
-                refund_msg = process_refund(target_date, nickname, member_record, row_idx)
-                
+                previous_log_row = get_existing_daily_log_row(target_date, nickname)
+                refund_updates, refund_msg, _ = build_refund_member_updates(target_date, nickname, member_record)
                 drive_url = image_url # 카카오 사진 원본 링크를 직접 사용 (구글 드라이브 업로드 생략)
                 
                 # '대기', 승인여부 'N' (기존 기록이 있다면 덮어쓰기)
@@ -783,9 +884,13 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     weekly_deduct=0.0,
                     monthly_deduct=0.0,
                 )
-                sheets_client.upsert_daily_log(log_row)
-                activate_member_if_needed(row_idx, member_record, source="special_off_submit")
-                reply_text = "🏥 특휴 증빙 사진이 정상 접수되었습니다. 방장 확인(승인) 전까지는 대기 상태가 유지됩니다." + refund_msg
+                if commit_daily_log_and_member_updates(
+                    sheets_client, row_idx, member_record, log_row, refund_updates, previous_log_row
+                ):
+                    activate_member_if_needed(row_idx, member_record, source="special_off_submit")
+                    reply_text = "🏥 특휴 증빙 사진이 정상 접수되었습니다. 방장 확인(승인) 전까지는 대기 상태가 유지됩니다." + refund_msg
+                else:
+                    reply_text = "시트 저장 중 오류가 발생했습니다. 기존 기록과 잔여 휴무는 변경하지 않았습니다. 잠시 후 다시 시도해 주세요."
             except Exception as e:
                 reply_text = f"이미지 업로드 중 에러 발생: {e}"
 
@@ -806,12 +911,10 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             target_override = None
             pending_deduct_amt = 0
             
-            # --- [당일 전환 로직] 환불 공통 처리 ---
-            refund_msg = process_refund(target_date, nickname, member_record, row_idx)
-            
             # 반휴일 경우 우선 잔여휴무 검증
             if auth_type == "반휴":
-                is_approved, msg, deduct_amt = check_in_engine.process_leave_request(member_record, "반휴")
+                validation_record = preview_member_record_after_refund(target_date, nickname, member_record)
+                is_approved, msg, deduct_amt = check_in_engine.process_leave_request(validation_record, "반휴")
                 if not is_approved:
                     return build_kakao_response(msg)
                 
@@ -825,7 +928,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 process_photo_auth_in_background,
                 request_id, image_url, auth_type, nickname,
                 dict(member_record), row_idx, target_date,
-                target_override, pending_deduct_amt, refund_msg, now
+                target_override, pending_deduct_amt, now
             )
             
             import urllib.parse
@@ -838,8 +941,6 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 f"🔗 {dashboard_url}"
                 f"{BUTTON_FALLBACK_HINT}"
             )
-            if refund_msg:
-                reply_text += f"\n{refund_msg}"
 
     print(f"📨 [카카오 응답 전송]: {reply_text[:100]}...")
     return build_kakao_response(reply_text)
