@@ -147,6 +147,7 @@ def _run_background(monkeypatch, sheets, ocr_result, callback_url=""):
     message = webhook.process_photo_auth_in_background(
         "req", "https://image", "일반", "산들바람", dict(sheets.member), 2,
         "2026-09-09", None, 0, datetime(2026, 9, 9, 20, 0), callback_url,
+        "https://study.hee-factory.com/dashboard?user=%EC%82%B0%EB%93%A4%EB%B0%94%EB%9E%8C",
     )
     return message, callbacks
 
@@ -211,6 +212,10 @@ def test_callback_success_missing_and_history_storage_failure(monkeypatch):
     ), "https://callback-secret")
     assert message.startswith("인증 완료") and len(callbacks) == 1
     assert callbacks[0][1]["json"]["version"] == "2.0"
+    text = callbacks[0][1]["json"]["template"]["outputs"][0]["simpleText"]["text"]
+    assert "https://study.hee-factory.com/dashboard?user=%EC%82%B0%EB%93%A4%EB%B0%94%EB%9E%8C" in text
+    assert "버튼이 안 보이면" in text
+    assert "이상 확인 시 그 주 일요일까지만 수정 가능합니다." in text
 
     sheets = FakeSheets(history_ok=False)
     message, callbacks = _run_background(monkeypatch, sheets, OCRResult(None, None, None, "", "OCR 실패"))

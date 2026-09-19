@@ -307,7 +307,7 @@ def _send_kakao_callback(callback_url: str, message: str, request_id: str) -> bo
 def process_photo_auth_in_background(
     request_id: str, image_url: str, auth_type: str, nickname: str,
     member_record: dict, row_idx: int, target_date: str,
-    target_override, pending_deduct_amt: float, now: datetime, callback_url: str = ""
+    target_override, pending_deduct_amt: float, now: datetime, callback_url: str = "", dashboard_url: str = ""
 ):
     """
     [카카오 5초 타임아웃 완전 회피]
@@ -505,7 +505,12 @@ def process_photo_auth_in_background(
     finally:
         if local_path and os.path.exists(local_path):
             os.remove(local_path)
-        _send_kakao_callback(callback_url, final_message, request_id)
+        callback_message = final_message
+        if dashboard_url:
+            callback_message += f"\n\n🔗 {dashboard_url}"
+        callback_message += BUTTON_FALLBACK_HINT
+        callback_message += "\n\n이상 확인 시 그 주 일요일까지만 수정 가능합니다."
+        _send_kakao_callback(callback_url, callback_message, request_id)
 
 def get_existing_daily_log_row(target_date: str, nickname: str, sheet_client=sheets_client) -> list:
     """기존 Daily_Log 행을 upsert_daily_log에 다시 넣을 수 있는 형태로 반환합니다."""
@@ -1032,20 +1037,20 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             # 🚀 [카카오 5초 타임아웃 완전 회피]
             # 사진 다운로드 + OCR + 시트 기록을 전부 백그라운드로 넘기고,
             # 카카오에게는 즉시 "접수 완료!" 응답을 1초 이내에 반환합니다.
+            import urllib.parse
+            encoded_nick = urllib.parse.quote(nickname, safe="")
+            dashboard_url = f"{request.base_url}dashboard?user={encoded_nick}"
+
             background_tasks.add_task(
                 process_photo_auth_in_background,
                 request_id, image_url, auth_type, nickname,
                 dict(member_record), row_idx, target_date,
-                target_override, pending_deduct_amt, now, callback_url
+                target_override, pending_deduct_amt, now, callback_url, dashboard_url
             )
 
             if callback_url:
                 return build_kakao_callback_wait_response()
             
-            import urllib.parse
-            encoded_nick = urllib.parse.quote(nickname)
-            dashboard_url = f"{request.base_url}dashboard?user={encoded_nick}"
-
             reply_text = (
                 f"📸 [{auth_type}] 인증 사진 접수 완료!\n\n"
                 f"아직 인증이 확정되지 않았습니다. 현재 결과 알림 연결이 없어 약 15초 후 아래 링크에서 판정과 거절 사유를 확인해주세요.\n\n"
