@@ -69,7 +69,8 @@ class SettlementEngine:
 
             date_str = str(log.get("날짜", "")).strip()
             log_type = str(log.get("유형", "")).strip()
-            is_participation = log_type in participation_types
+            is_participation = (log_type in participation_types and str(log.get("판정", ""))
+                                not in {"판독실패", "OCR실패", "검증거절", "누적거절", "처리실패", "과거사진"})
             if date_str and is_participation:
                 member_participation_days[nick].add(date_str)
 

@@ -26,7 +26,7 @@ def build_member_photo_history(all_history, logs, nickname):
         item = dict(history)
         current = current_log_by_date.get(str(item.get("날짜", "")))
         same_image = current and str(current.get("이미지ID", "")) == str(item.get("이미지ID", ""))
-        item["관계"] = "현재 최종 기록" if same_image else "현재 최종 기록에 미적용 (기존 결과 유지)"
+        item["관계"] = "현재 최종 기록" if same_image else "이전 제출 기록"
         photo_history.append(item)
     photo_history.sort(key=lambda item: str(item.get("제출시각", "")), reverse=True)
     return photo_history
@@ -90,7 +90,8 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
         dur = parse_duration_to_min(str(log.get("당일시간", "")))
         
         # view 범위에 맞는 로그만 합산
-        if d_str in date_strs and n_str in acc_map:
+        if (d_str in date_strs and n_str in acc_map
+                and str(log.get("판정", "")) not in {"판독실패", "OCR실패", "검증거절", "누적거절", "처리실패", "과거사진"}):
             acc_map[n_str] += dur
             
     # 2. 리더보드 구성 (동적 합산 기준 정렬)

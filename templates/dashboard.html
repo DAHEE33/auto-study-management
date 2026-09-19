@@ -429,7 +429,9 @@
                         
                         <td>
                             <!-- 로직에 따른 배지 렌더링 -->
-                            {% if cell.penalty < 0 %}
+                            {% if cell.status in ["판독실패", "OCR실패", "검증거절", "누적거절", "처리실패", "과거사진"] %}
+                                <div class="badge fail" data-tooltip="{{ cell.tooltip }}">{{ cell.status }}</div>
+                            {% elif cell.penalty < 0 %}
                                 <div class="badge fail" data-tooltip="{{ cell.tooltip }}">{{ cell.penalty }}</div>
                             
                             {% elif cell.status == "-" %}
@@ -478,7 +480,6 @@
     {% if my_stats.is_valid %}
     <div class="history-card">
         <h2 class="section-title">📷 내 사진 인증 제출 이력</h2>
-        <p style="color:var(--text-secondary);">실패·거절 이력은 출석으로 인정되지 않으며, 현재 최종 기록은 위 출석표의 Daily_Log 결과입니다.</p>
         <table>
             <thead><tr><th>제출시각 / 대상일</th><th>사진</th><th>판독 시간</th><th>판정 / 처리사유</th><th>최종 기록 관계</th></tr></thead>
             <tbody>

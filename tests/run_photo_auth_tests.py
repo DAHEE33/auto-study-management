@@ -75,6 +75,10 @@ def with_patch(fn, *args):
 
 
 cases = [
+    ("최신 실패/전체 이력/차감 보존", lambda: with_patch(tests.test_latest_failure_keeps_money_and_leave_for_later_refund)),
+    ("실패 반휴의 허위 환불 방지", lambda: with_patch(tests.test_new_half_leave_failure_does_not_create_refund)),
+    ("주말 정산/평일 집계", lambda: with_patch(tests.test_weekly_report_weekend_only_and_same_week_range)),
+    ("팝업 거절 콜백", lambda: with_patch(tests.test_rejected_popup_sends_callback_without_daily_log)),
     ("OCR 공백 회귀", tests.test_sandlebaram_regression_with_space_between_number_and_unit),
     ("다중 행/열 순서", tests.test_multiple_rows_use_only_nickname_row_and_preserve_column_order),
     ("0시간과 실패 구분", tests.test_zero_duration_is_a_successful_read),
@@ -85,7 +89,7 @@ cases = [
     ("누적 증가/큰 증가", lambda: with_patch(tests.test_increasing_total_is_applied_and_large_jump_is_allowed)),
     ("누적 동일 거절", lambda: with_patch(tests.test_equal_or_decreased_total_rejected_without_overwrite, 6000)),
     ("누적 감소 거절", lambda: with_patch(tests.test_equal_or_decreased_total_rejected_without_overwrite, 5999)),
-    ("실패 재제출 보존", lambda: with_patch(tests.test_failed_resubmission_preserves_final_record_and_writes_history)),
+    ("실패 재제출 최신 반영", lambda: with_patch(tests.test_failed_resubmission_preserves_final_record_and_writes_history)),
     ("과거 사진 벌금/재제출", lambda: with_patch(tests.test_past_photo_penalty_and_existing_final_policy)),
     ("콜백/미제공/이력실패", lambda: with_patch(tests.test_callback_success_missing_and_history_storage_failure)),
     ("콜백 실패 중복방지", lambda: with_patch(tests.test_callback_transport_and_body_failure_do_not_repeat_auth)),

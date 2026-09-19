@@ -110,7 +110,9 @@ class FakeSheets:
     def get_today_auth_history(self, *_):
         if not self.daily:
             return {}
-        return {"prev_type": self.daily[2], "prev_status": self.daily[3], "prev_duration": 120}
+        return {"prev_type": self.daily[2], "prev_status": self.daily[3], "prev_duration": 120,
+                "prev_weekly_deduct": self.daily[9] if len(self.daily) > 9 else 0,
+                "prev_monthly_deduct": self.daily[10] if len(self.daily) > 10 else 0}
     def get_daily_penalty(self, *_): return int(self.daily[7]) if self.daily else 0
     def update_cell(self, _, row, col, value):
         self.update_calls.append((row, col, value))
@@ -168,7 +170,7 @@ def test_equal_or_decreased_total_rejected_without_overwrite(monkeypatch, total)
         "2026-09-09 20:00:00", 121, total, ""
     ))
     assert message.startswith("인증 거절")
-    assert sheets.daily == old
+    assert sheets.daily[3] == "누적거절"
     assert sheets.member["최종누적"] == "100시간 0분"
     assert sheets.history[0][3] == "누적거절"
 
@@ -177,8 +179,9 @@ def test_failed_resubmission_preserves_final_record_and_writes_history(monkeypat
     old = ["2026-09-09", "산들바람", "주휴", "PASS", "-", "0", "-", "0", "old"]
     sheets = FakeSheets(daily=old)
     message, _ = _run_background(monkeypatch, sheets, OCRResult(None, None, None, "", "사진 형식 오류"))
-    assert "기존 최종 인증" in message
-    assert sheets.daily == old
+    assert "판독 실패로 기록" in message
+    assert sheets.daily[3] == "판독실패"
+    assert sheets.daily[9] == "1.0"
     assert sheets.history[0][3] == "판독실패"
     assert sheets.update_calls == []
 
@@ -196,8 +199,8 @@ def test_past_photo_penalty_and_existing_final_policy(monkeypatch):
     message, _ = _run_background(monkeypatch, sheets, OCRResult(
         "2026-09-08 20:00:00", 121, 7000, ""
     ))
-    assert "기존 최종 인증은 유지" in message
-    assert sheets.daily == old
+    assert "기존 차감 내역은 유지" in message
+    assert sheets.daily[3] == "과거사진"
     assert not sheets.update_calls
 
 
@@ -257,7 +260,7 @@ def test_callback_wait_optional_day_and_dashboard_history_filter():
     result = build_member_photo_history(history, logs, "me")
     assert [item["이미지ID"] for item in result] == ["new", "old"]
     assert result[0]["관계"] == "현재 최종 기록"
-    assert "미적용" in result[1]["관계"]
+    assert result[1]["관계"] == "이전 제출 기록"
 
 
 def test_normal_leave_refund_rule_is_preserved(monkeypatch):
@@ -291,3 +294,59 @@ def test_latest_total_recheck_prevents_older_completion_overwrite(monkeypatch):
     assert first.startswith("인증 완료")
     assert second.startswith("인증 거절")
     assert sheets.member["최종누적"] == "133시간 20분"
+
+
+def test_weekly_report_weekend_only_and_same_week_range(monkeypatch):
+    import jobs.weekly_settlement as job
+    class Clock(datetime):
+        @classmethod
+        def now(cls): return cls(2026, 9, 18, 12)
+    calls, writes = [], []
+    monkeypatch.setattr(job, "datetime", Clock)
+    monkeypatch.setattr(job, "sheets_client", SimpleNamespace(
+        get_sheet_records=lambda name: [], append_row=lambda *args: writes.append(args)))
+    monkeypatch.setattr(job, "settlement_engine", SimpleNamespace(
+        generate_weekly_report=lambda **kwargs: calls.append(kwargs) or "report"))
+    job.run_weekly_settlement_job()
+    assert not calls and not writes
+    for day in (19, 20):
+        monkeypatch.setattr(Clock, "now", classmethod(lambda cls, day=day: cls(2026, 9, day, 12)))
+        job.run_weekly_settlement_job()
+        assert calls[-1]["start_date"] == "2026-09-12"
+        assert calls[-1]["end_date"] == "2026-09-18"
+
+
+def test_rejected_popup_sends_callback_without_daily_log(monkeypatch):
+    sheets = FakeSheets()
+    message, callbacks = _run_background(monkeypatch, sheets,
+        OCRResult(None, None, None, "", "출석표 사진이 아닙니다"), "https://callback")
+    assert message.startswith("인증 거절")
+    assert sheets.daily[3] == "판독실패" and len(sheets.history) == 1
+    assert len(callbacks) == 1
+    assert "인증 거절" in callbacks[0][1]["json"]["template"]["outputs"][0]["simpleText"]["text"]
+
+
+def test_latest_failure_keeps_money_and_leave_for_later_refund(monkeypatch):
+    import routers.webhook as webhook
+    old = ["2026-09-09", "산들바람", "반휴", "PASS", "-", "1시간", "100시간", "-500", "old", "0.5", "0.0"]
+    sheets = FakeSheets(daily=old)
+    sheets.member["주간휴무"] = "0.5"
+    sheets.member["예치금"] = "9500"
+    for _ in range(2):
+        _run_background(monkeypatch, sheets, OCRResult(None, None, None, "", "잘못된 사진"))
+    assert sheets.daily[3] == "판독실패"
+    assert sheets.daily[7:11] == ["-500", "https://image", "0.5", "0.0"]
+    assert len(sheets.history) == 2 and not sheets.update_calls
+    updates, _, preview = webhook.build_refund_member_updates("2026-09-09", "산들바람", sheets.member, sheets)
+    assert preview["주간휴무"] == "1.0"
+    assert preview["예치금"] == "10000"
+    assert len(updates) == 2
+
+
+def test_new_half_leave_failure_does_not_create_refund(monkeypatch):
+    import routers.webhook as webhook
+    sheets = FakeSheets()
+    webhook.save_latest_photo_failure(sheets, "2026-09-09", "산들바람", "반휴", "판독실패", None, None, "image")
+    sheets.member["주간휴무"] = "0.0"
+    updates, _, preview = webhook.build_refund_member_updates("2026-09-09", "산들바람", sheets.member, sheets)
+    assert updates == [] and preview["주간휴무"] == "0.0"

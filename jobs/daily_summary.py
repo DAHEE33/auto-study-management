@@ -72,6 +72,8 @@ def _build_cell_value(log: Dict, half_leave_order: int | None = None) -> str:
     penalty = _parse_penalty(str(log.get("벌금액", "0")))
     status = str(log.get("판정", "")).strip()
 
+    if status in {"판독실패", "OCR실패", "검증거절", "누적거절", "처리실패", "과거사진"}:
+        return str(penalty) if penalty < 0 else "-"
     if leave_type in LEAVE_TYPES:
         if leave_type == "반휴":
             if half_leave_order in (1, 2):

@@ -46,8 +46,11 @@ def run_weekly_settlement_job():
     
     # 1. 정산 대상 날짜 산정 (보통 토요일에 실행하므로 이번주 토요일을 기준으로 최근 7일)
     now = datetime.now()
-    end_date_obj = now - timedelta(days=1)  # 금요일
-    start_date_obj = end_date_obj - timedelta(days=6) # 지난주 토요일
+    if now.weekday() < 5:
+        print("주간 정산·분배 안내는 주말에만 생성합니다.")
+        return
+    end_date_obj = now - timedelta(days=now.weekday() - 4)  # 이번 주 금요일
+    start_date_obj = end_date_obj - timedelta(days=6)  # 표시 기간은 지난 토요일~이번 금요일
     
     start_date = start_date_obj.strftime("%Y-%m-%d")
     end_date = end_date_obj.strftime("%Y-%m-%d")
@@ -68,7 +71,7 @@ def run_weekly_settlement_job():
         try:
             log_d = datetime.strptime(val, "%Y-%m-%d")
             # 시작일 <= 로그일 <= 종료일
-            if start_date_obj.date() <= log_d.date() <= end_date_obj.date():
+            if start_date_obj.date() <= log_d.date() <= end_date_obj.date() and log_d.weekday() < 5:
                 filtered_logs.append(log)
         except ValueError:
             pass

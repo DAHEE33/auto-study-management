@@ -269,6 +269,24 @@ def _history_row(target_date, nickname, auth_type, status, daily, total, penalty
     ]
 
 
+def save_latest_photo_failure(sheet_client, target_date, nickname, auth_type, status, daily, total, image_url):
+    """최신 실패를 표시하되 이미 실제로 차감된 금액/휴무는 환불 없이 보존합니다."""
+    sheet_client.clear_cache("Daily_Log")
+    previous = get_existing_daily_log_row(target_date, nickname, sheet_client)
+    penalty = int(previous[7]) if previous else 0
+    weekly = safe_float(previous[9]) if previous else 0.0
+    monthly = safe_float(previous[10]) if previous else 0.0
+    if previous and previous[3] == "PASS" and weekly == monthly == 0:
+        weekly = {"주휴": 1.0, "반휴": 0.5}.get(previous[2], 0.0)
+        monthly = 1.0 if previous[2] == "월휴" else 0.0
+    return sheet_client.upsert_daily_log(build_daily_log_row(
+        target_date, nickname, auth_type, status, "-",
+        format_min_to_str(daily) if daily is not None else "-",
+        format_min_to_str(total) if total is not None else "-",
+        penalty, image_url, weekly, monthly,
+    ))
+
+
 def _send_kakao_callback(callback_url: str, message: str, request_id: str) -> bool:
     if not callback_url:
         return True
@@ -330,8 +348,11 @@ def process_photo_auth_in_background(
                 target_date, nickname, auth_type, "판독실패", None, None, 0, drive_url, now, reason
             ))
             history_written = history_ok
-            final_message = f"인증 거절: {reason}\n기존 최종 인증이 있다면 그대로 유지됩니다."
-            if not history_ok:
+            with _photo_auth_lock(nickname, target_date):
+                log_ok = save_latest_photo_failure(bg_sheets, target_date, nickname, auth_type,
+                                                   "판독실패", None, None, drive_url)
+            final_message = f"인증 거절: {reason}\n최신 제출 결과에 판독 실패로 기록했습니다."
+            if not history_ok or not log_ok:
                 final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 인증은 확정되지 않았습니다."
             return final_message
 
@@ -359,13 +380,13 @@ def process_photo_auth_in_background(
             row_idx = latest_member.get("_row_index", row_idx)
             existing = bg_sheets.get_today_auth_history(target_date, nickname)
 
-            # 날짜/사진 형식 실패는 기존 최종 결과를 건드리지 않습니다.
+            # 날짜 검증 실패도 최신 제출 결과에 표시합니다.
             if not time_validation.valid:
                 penalty = -5000 if time_validation.is_past_date and not existing else 0
                 status_msg = "과거사진" if time_validation.is_past_date else "검증거절"
                 reason = time_validation.reason
                 if existing:
-                    reason += " 기존 최종 인증은 유지했습니다."
+                    reason += " 최신 제출 결과를 갱신하며 기존 차감 내역은 유지합니다."
                 elif time_validation.is_past_date:
                     old_deposit = int(str(latest_member.get("예치금", "0")).replace(",", "") or 0)
                     deposit_ok = bg_sheets.update_cell("Member_Master", row_idx, 8, str(old_deposit + penalty))
@@ -376,17 +397,19 @@ def process_photo_auth_in_background(
                     if not deposit_ok or not log_ok:
                         final_message = "처리 실패: 시트 저장에 실패하여 인증을 확정하지 못했습니다."
                         return final_message
+                log_ok = save_latest_photo_failure(bg_sheets, target_date, nickname, auth_type,
+                                                   status_msg, duration, total_mnts, drive_url)
                 history_ok = bg_sheets.append_row("Photo_Auth_History", _history_row(
                     target_date, nickname, auth_type, status_msg, duration, total_mnts,
                     penalty, drive_url, now, reason,
                 ))
                 history_written = history_ok
-                if not history_ok:
-                    final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 정상 저장으로 확정하지 않습니다."
+                if not history_ok or not log_ok:
+                    final_message = "처리 실패: 제출 결과를 모두 저장하지 못했습니다."
                 elif time_validation.is_past_date:
                     final_message = f"과거 날짜 사진: 사진 {end_time[:10]} / 인증 대상일 {target_date} / {penalty:,}원"
                     if existing:
-                        final_message += "\n기존 최종 인증은 유지되었습니다."
+                        final_message += "\n최신 제출 결과로 기록했으며 기존 차감 내역은 유지됩니다."
                 else:
                     final_message = f"인증 거절: {reason}"
                 return final_message
@@ -394,14 +417,16 @@ def process_photo_auth_in_background(
             previous_total = parse_duration_to_min(latest_member.get("최종누적", "0"))
             if total_mnts <= previous_total:
                 relation = "같습니다" if total_mnts == previous_total else "감소했습니다"
-                reason = f"사진 누적시간이 기존 최종누적보다 {relation}. 기존 최종 인증을 유지했습니다."
+                reason = f"사진 누적시간이 기존 최종누적보다 {relation}. 최신 제출 결과에 누적시간 검증 실패로 기록했습니다."
                 history_ok = bg_sheets.append_row("Photo_Auth_History", _history_row(
                     target_date, nickname, auth_type, "누적거절", duration, total_mnts, 0,
                     drive_url, now, reason,
                 ))
                 history_written = history_ok
+                log_ok = save_latest_photo_failure(bg_sheets, target_date, nickname, auth_type,
+                                                   "누적거절", duration, total_mnts, drive_url)
                 final_message = f"인증 거절: {reason}"
-                if not history_ok:
+                if not history_ok or not log_ok:
                     final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 인증은 확정되지 않았습니다."
                 return final_message
 
@@ -469,6 +494,9 @@ def process_photo_auth_in_background(
                     target_date, nickname, auth_type, "처리실패", None, None, 0,
                     image_url, now, "사진 다운로드 또는 인증 처리 중 오류가 발생했습니다.",
                 ))
+                with _photo_auth_lock(nickname, target_date):
+                    save_latest_photo_failure(bg_sheets, target_date, nickname, auth_type,
+                                              "처리실패", None, None, image_url)
                 if not history_written:
                     final_message = "처리 실패: 제출 이력도 저장하지 못했습니다. 인증은 확정되지 않았습니다."
             except Exception:
@@ -511,7 +539,7 @@ def build_refund_member_updates(target_date: str, nickname: str, member_record: 
     prev_type = today_auth.get("prev_type", "")
     prev_weekly_deduct = safe_float(today_auth.get("prev_weekly_deduct", 0.0))
     prev_monthly_deduct = safe_float(today_auth.get("prev_monthly_deduct", 0.0))
-    if prev_weekly_deduct == 0 and prev_monthly_deduct == 0:
+    if prev_weekly_deduct == 0 and prev_monthly_deduct == 0 and today_auth.get("prev_status") == "PASS":
         if prev_type == "주휴":
             prev_weekly_deduct = 1.0
         elif prev_type == "반휴":
@@ -602,7 +630,7 @@ def preview_member_record_after_refund(target_date: str, nickname: str, member_r
     prev_type = today_auth.get("prev_type", "")
     prev_weekly_deduct = safe_float(today_auth.get("prev_weekly_deduct", 0.0))
     prev_monthly_deduct = safe_float(today_auth.get("prev_monthly_deduct", 0.0))
-    if prev_weekly_deduct == 0 and prev_monthly_deduct == 0:
+    if prev_weekly_deduct == 0 and prev_monthly_deduct == 0 and today_auth.get("prev_status") == "PASS":
         if prev_type == "주휴":
             prev_weekly_deduct = 1.0
         elif prev_type == "반휴":
@@ -630,11 +658,13 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     """카카오톡 채널 챗봇(오픈빌더)으로부터 들어오는 요청을 처리합니다."""
     body = await request.json()
     user_request = body.get("userRequest", {})
-    callback_url = str(user_request.get("callbackUrl", "")).strip()
+    callback_url = str(user_request.get("callbackUrl") or "").strip()
     utterance = user_request.get("utterance", "").strip()
     action = body.get("action", {})
     params = action.get("detailParams", {})
     request_id = uuid.uuid4().hex[:8]
+    block = user_request.get("block") or {}
+    print(f"[{request_id}] callback_present={bool(callback_url)}, block_id={block.get('id', '')}, block_name={block.get('name', '')}")
     
     # 1. UserKey 추출 및 멤버 확보
     userkey = user_request.get("user", {}).get("id", "")
@@ -978,10 +1008,10 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
             if is_half_off:
                 # 반휴 누르고 아직 사진 안 보냈으므로 상태 기억!
                 user_states[userkey] = {"type": "반휴", "expires": now + timedelta(minutes=10)}
-                reply_text = "🌗 반휴 적용을 위해 오늘 최소 1시간을 달성한 구루미 타이머 사진을 전송해 주세요. (이제 텍스트 없이 사진만 보내도 됩니다!)"
+                reply_text = "🌗 오늘 최소 1시간을 달성한 구루미 출석표 사진을 보내주세요. 본인 닉네임, 출석 날짜·시각, 공부시간, 누적시간이 같은 행에 보여야 합니다. 타이머 팝업은 인정되지 않습니다."
             else:
                 reply_text = (
-                    "🔥 타이머와 누적시간이 잘 보이는 [구루미 메인 화면] 캡처 사진을 전송해 주셔야 공부 판독이 가능합니다."
+                    "🔥 구루미 출석표 사진을 보내주세요. 본인 닉네임, 출석 날짜·시각, 공부시간, 누적시간이 같은 행에 보여야 합니다. 타이머 팝업은 인정되지 않습니다."
                     + BUTTON_FALLBACK_HINT
                 )
         else:
@@ -1018,7 +1048,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
 
             reply_text = (
                 f"📸 [{auth_type}] 인증 사진 접수 완료!\n\n"
-                f"OCR 분석 중입니다. 약 15초 후 아래 링크에서 결과를 확인하세요.\n\n"
+                f"아직 인증이 확정되지 않았습니다. 현재 결과 알림 연결이 없어 약 15초 후 아래 링크에서 판정과 거절 사유를 확인해주세요.\n\n"
                 f"🔗 {dashboard_url}"
                 f"{BUTTON_FALLBACK_HINT}"
             )
