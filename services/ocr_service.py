@@ -1,92 +1,141 @@
 import os
 import re
+from dataclasses import dataclass
+from typing import Optional
+
 from google.cloud import vision
+
 from core.config import settings
-from typing import Optional, Tuple
+
+
+TIMESTAMP_RE = re.compile(r"\b(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})\b")
+DURATION_RE = re.compile(r"(?:(\d+)\s*시간(?:\s*(\d+)\s*분)?|(\d+)\s*분)")
+
+
+@dataclass(frozen=True)
+class OCRResult:
+    attendance_at: Optional[str]
+    daily_minutes: Optional[int]
+    total_minutes: Optional[int]
+    full_text: str
+    error: Optional[str] = None
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None
+
 
 class OCRService:
     def __init__(self):
-        self.is_mock = False
         self.client = None
-        
         try:
-            # Set environment variable for Google Cloud SDK auth
             if settings.credentials_path.exists():
                 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(settings.credentials_path)
                 self.client = vision.ImageAnnotatorClient()
+        except Exception as exc:
+            # 초기화 실패를 성공형 mock 데이터로 바꾸지 않습니다.
+            print(f"⚠️ Google Cloud Vision init failed: {type(exc).__name__}")
+
+    @staticmethod
+    def _duration_minutes(match: re.Match) -> int:
+        hours = int(match.group(1) or 0)
+        minutes = int(match.group(2) or match.group(3) or 0)
+        return hours * 60 + minutes
+
+    @staticmethod
+    def _normalize_nickname(value: str) -> str:
+        return re.sub(r"\s+", "", value).casefold()
+
+    @classmethod
+    def parse_attendance_rows(cls, rows: list[str], nickname: str, full_text: str = "") -> OCRResult:
+        """좌표로 조립된 각 가로 행에서 닉네임→시각→당일→누적 순서를 검증합니다."""
+        wanted = cls._normalize_nickname(nickname)
+        matches = []
+        for row in rows:
+            timestamp = TIMESTAMP_RE.search(row)
+            if not timestamp:
+                continue
+
+            nickname_area = row[:timestamp.start()].strip(" |\t")
+            if not nickname_area or wanted not in cls._normalize_nickname(nickname_area):
+                continue
+
+            durations = list(DURATION_RE.finditer(row, timestamp.end()))
+            if len(durations) != 2:
+                continue
+
+            matches.append((
+                timestamp.group(1),
+                cls._duration_minutes(durations[0]),
+                cls._duration_minutes(durations[1]),
+            ))
+
+        if len(matches) != 1:
+            reason = "닉네임과 필수 열이 일치하는 행을 찾지 못했습니다."
+            if len(matches) > 1:
+                reason = "닉네임과 일치하는 출석표 행이 여러 개입니다."
+            return OCRResult(None, None, None, full_text, reason)
+
+        attendance_at, daily, total = matches[0]
+        return OCRResult(attendance_at, daily, total, full_text)
+
+    @staticmethod
+    def _rows_from_annotations(annotations) -> list[str]:
+        words = []
+        for annotation in annotations:
+            vertices = getattr(getattr(annotation, "bounding_poly", None), "vertices", None)
+            if not vertices:
+                continue
+            xs = [getattr(vertex, "x", 0) or 0 for vertex in vertices]
+            ys = [getattr(vertex, "y", 0) or 0 for vertex in vertices]
+            words.append({
+                "text": str(getattr(annotation, "description", "")).strip(),
+                "x": min(xs),
+                "cy": (min(ys) + max(ys)) / 2,
+                "height": max(1, max(ys) - min(ys)),
+            })
+
+        lines = []
+        for word in sorted(words, key=lambda item: (item["cy"], item["x"])):
+            line = next(
+                (candidate for candidate in lines
+                 if abs(candidate["cy"] - word["cy"]) <= max(candidate["height"], word["height"]) * 0.65),
+                None,
+            )
+            if line is None:
+                lines.append({"cy": word["cy"], "height": word["height"], "words": [word]})
             else:
-                self.is_mock = True
-        except Exception as e:
-            print(f"⚠️ Google Cloud Vision init failed: {e}. Running in MOCK Mode.")
-            self.is_mock = True
+                line["words"].append(word)
+                count = len(line["words"])
+                line["cy"] = ((line["cy"] * (count - 1)) + word["cy"]) / count
+                line["height"] = max(line["height"], word["height"])
 
-    def _parse_duration_to_minutes(self, text: str) -> int:
-        """'X시간 Y분' 또는 'X시간' 또는 'Y분' 형태의 텍스트를 파싱하여 분 단위로 반환"""
-        match = re.search(r'(?:(\d+)시간)?\s*(?:(\d+)분)?', text)
-        if not match:
-            return 0
-        h = int(match.group(1) or 0)
-        m = int(match.group(2) or 0)
-        return h * 60 + m
+        return [
+            " ".join(word["text"] for word in sorted(line["words"], key=lambda item: item["x"]))
+            for line in sorted(lines, key=lambda item: item["cy"])
+        ]
 
-    def extract_time_from_image(self, image_path: str) -> Tuple[Optional[str], int, int, str]:
-        """
-        구루미 UI 이미지에서 텍스트를 파싱하여 공부 종료 시각과 순공 시간을 추출합니다.
-        Returns:
-            (종료시각 "YYYY-MM-DD HH:MM:SS" 또는 "HH:MM", 당일시간(분), 누적시간(분), OCR원문텍스트)
-        """
-        if self.is_mock:
-            # Mock 데이터 반환 (테스트용)
-            print(f"[MOCK] OCR 추출 진행: {image_path}")
-            return "23:55", 120, 8550, "dev_user 2시간 142시간 30분 2026-04-15 20:49:02"
-            
+    def extract_time_from_image(self, image_path: str, nickname: str) -> OCRResult:
+        if self.client is None:
+            return OCRResult(None, None, None, "", "OCR 서비스를 초기화하지 못했습니다.")
+
         try:
             with open(image_path, "rb") as image_file:
-                content = image_file.read()
+                response = self.client.text_detection(image=vision.Image(content=image_file.read()))
 
-            image = vision.Image(content=content)
-            # OCR 엔진 호출
-            response = self.client.text_detection(image=image)
-            texts = response.text_annotations
-            
-            if not texts:
-                return None, 0, 0, ""
-                
-            full_text = texts[0].description
-            
-            # 1. 종료 시각(타임스탬프) 파싱
-            # 보통 "2026-04-15 20:49:02" 포맷을 띌 것이라 가정 (수정된 스펙 기준)
-            # 타임스탬프가 없으면 HH:MM 단독 포맷 대비.
-            dt_match = re.search(r'\d{4}-\d{2}-\d{2}\s\d{2}:\d{2}:\d{2}', full_text)
-            if dt_match:
-                end_time = dt_match.group(0)
-            else:
-                hm_match = re.findall(r'\b([0-1]?[0-9]|2[0-3]):([0-5][0-9])\b', full_text)
-                end_time = f"{hm_match[-1][0]}:{hm_match[-1][1]}" if hm_match else None
+            if getattr(response, "error", None) and response.error.message:
+                return OCRResult(None, None, None, "", "OCR 처리에 실패했습니다.")
 
-            # 2. 당일시간, 누적시간 파싱 ("X시간 Y분" 형태)
-            durations = re.findall(r'(\d+시간(?:\s*\d+분)?|\d+분)', full_text)
-            
-            daily_mnts = 0
-            total_mnts = 0
-            
-            if len(durations) == 0:
-                pass
-            elif len(durations) == 1:
-                # 하나만 인식된 경우 (보통 당일시간일 확률이 높음)
-                daily_mnts = self._parse_duration_to_minutes(durations[0])
-            else:
-                # 두 개 이상 인식되었을 경우, 당일시간과 누적시간 구분
-                # 일반적으로 누적시간이 물리적으로 더 큼
-                val1 = self._parse_duration_to_minutes(durations[0])
-                val2 = self._parse_duration_to_minutes(durations[1])
-                daily_mnts = min(val1, val2)
-                total_mnts = max(val1, val2)
-            
-            return end_time, daily_mnts, total_mnts, full_text
-            
-        except Exception as e:
-            print(f"OCR Error: {e}")
-            return None, 0, 0, ""
+            annotations = response.text_annotations
+            if not annotations:
+                return OCRResult(None, None, None, "", "사진에서 문자를 찾지 못했습니다.")
+
+            full_text = annotations[0].description
+            rows = self._rows_from_annotations(annotations[1:])
+            return self.parse_attendance_rows(rows, nickname, full_text)
+        except Exception as exc:
+            print(f"OCR Error: {type(exc).__name__}")
+            return OCRResult(None, None, None, "", "OCR 처리 중 오류가 발생했습니다.")
+
 
 ocr_service = OCRService()

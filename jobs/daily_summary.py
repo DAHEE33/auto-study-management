@@ -80,7 +80,7 @@ def _build_cell_value(log: Dict, half_leave_order: int | None = None) -> str:
         return leave_type
     if penalty < 0:
         return str(penalty)
-    if status and status != "-":
+    if status == "PASS":
         return "o"
     return "-"
 

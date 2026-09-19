@@ -11,7 +11,7 @@ class SettlementEngine:
         - 결석(아예 전송 안한 경우 거나 01~02시 목표 미달 시): -2000
         - 시간 미달 (1시간 이상 인증): -500
         - 시간 미달 (1시간 미만 인증): -1000
-        - 허위 인증 (날짜/누적 오류): -1000 (날짜), -5000 (누적시간)
+        - 명확한 과거 날짜 사진: -5000
         """
         if is_absent:
             return -2000
@@ -20,7 +20,7 @@ class SettlementEngine:
             return -5000
             
         if is_fake_date:
-            return -1000
+            return -5000
             
         if auth_minutes < target_minutes:
             if auth_minutes >= 60:

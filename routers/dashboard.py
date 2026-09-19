@@ -12,6 +12,25 @@ current_dir = os.path.dirname(os.path.realpath(__file__))
 templates_dir = os.path.join(os.path.dirname(current_dir), "templates")
 templates = Jinja2Templates(directory=templates_dir)
 
+
+def build_member_photo_history(all_history, logs, nickname):
+    current_log_by_date = {
+        str(log.get("날짜", "")): log
+        for log in logs
+        if str(log.get("닉네임", "")).strip() == str(nickname or "").strip()
+    }
+    photo_history = []
+    for history in all_history:
+        if str(history.get("닉네임", "")).strip() != str(nickname or "").strip():
+            continue
+        item = dict(history)
+        current = current_log_by_date.get(str(item.get("날짜", "")))
+        same_image = current and str(current.get("이미지ID", "")) == str(item.get("이미지ID", ""))
+        item["관계"] = "현재 최종 기록" if same_image else "현재 최종 기록에 미적용 (기존 결과 유지)"
+        photo_history.append(item)
+    photo_history.sort(key=lambda item: str(item.get("제출시각", "")), reverse=True)
+    return photo_history
+
 @router.get("", response_class=HTMLResponse)
 async def view_dashboard(request: Request, user: str = Query(None), view: str = Query("weekly")):
     """
@@ -26,6 +45,7 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
 
     members = sheets_client.get_sheet_records("Member_Master")
     logs = sheets_client.get_sheet_records("Daily_Log")
+    all_photo_history = sheets_client.get_sheet_records("Photo_Auth_History")
     
     active_members = [m for m in members if str(m.get("상태", "")) == "활동"]
     ordered_nicks = [str(m.get("닉네임", "")).strip() for m in active_members if str(m.get("닉네임", "")).strip()]
@@ -156,8 +176,10 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
                 tooltip = f"[{ltype}]"
             elif ltype == "반휴":
                 tooltip = f"반휴({pen}원) | {dur}"
-            else:
+            elif status == "PASS":
                 tooltip = f"PASS | {dur}"
+            else:
+                tooltip = f"{status or '인증 실패'} | {dur}"
                 
             matrix[d][n] = {
                 "status": status,
@@ -168,6 +190,8 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
             }
 
     is_weekly = view != "monthly"
+
+    photo_history = build_member_photo_history(all_photo_history, logs, user)
 
     return templates.TemplateResponse(
         request=request,
@@ -180,5 +204,6 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
             "nicknames": ordered_nicks,
             "matrix": matrix,
             "is_weekly": is_weekly,
+            "photo_history": photo_history,
         }
     )

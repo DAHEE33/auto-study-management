@@ -10,6 +10,7 @@ venv.bak/
 # Credentials & Secrets
 credentials.json
 client_secrets.json
+auto-morning.json
 *.pem
 
 # Python
@@ -44,3 +45,6 @@ MANIFEST
 .DS_Store
 
 tech_blog_deployment.md
+
+.history/
+docs/

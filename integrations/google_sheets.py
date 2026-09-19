@@ -39,6 +39,7 @@ class GoogleSheetsClient:
                 {"닉네임": "dev_user", "UserKey": "UK123", "상태": "활동", "목표시간": "120", "최종누적": "15600", "주간휴무": "1.0", "남은월휴": "1", "예치금": "10000", "비고": "-", "남은특휴": "1", "가입일자": "2026-05-08", "예치금환불": "불가", "예치금소진일자": "-"},
             ],
             "Daily_Log": [],
+            "Photo_Auth_History": [],
             "Admin_Config": [{"날짜": "2026-05-01", "이벤트 타입": "특휴개수", "목표시간 조정": "0", "주간 공지사항 (추가 멘트)": "-", "월별특휴개수": "3"}]
         }
 
@@ -73,13 +74,13 @@ class GoogleSheetsClient:
             self._cache.clear()
             self._cache_time.clear()
 
-    def get_sheet_records(self, sheet_name: str) -> List[Dict]:
+    def get_sheet_records(self, sheet_name: str, force_refresh: bool = False) -> List[Dict]:
         """Fetch all records from a specific sheet as a list of dictionaries."""
         if self.is_mock:
             return self.mock_data.get(sheet_name, [])
             
         now = time.time()
-        if sheet_name in self._cache and (now - self._cache_time.get(sheet_name, 0)) < self.CACHE_TTL:
+        if not force_refresh and sheet_name in self._cache and (now - self._cache_time.get(sheet_name, 0)) < self.CACHE_TTL:
             return self._cache[sheet_name]
 
         try:
@@ -136,6 +137,12 @@ class GoogleSheetsClient:
         if self.is_mock:
             if sheet_name not in self.mock_data:
                 self.mock_data[sheet_name] = []
+            headers = {
+                "Photo_Auth_History": ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간", "사진누적", "벌금액", "이미지ID", "제출시각", "처리사유"],
+                "Daily_Log": ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간", "사진누적", "벌금액", "이미지ID"],
+            }.get(sheet_name)
+            if headers:
+                self.mock_data[sheet_name].append(dict(zip(headers, row_data)))
             print(f"[MOCK] Appended to {sheet_name}: {row_data}")
             return True
             
@@ -165,6 +172,14 @@ class GoogleSheetsClient:
         """
         self.clear_cache("Daily_Log")
         if self.is_mock:
+            headers = ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간", "사진누적", "벌금액", "이미지ID"]
+            replacement = dict(zip(headers, row_data))
+            for idx, row in enumerate(self.mock_data["Daily_Log"]):
+                if str(row.get("날짜", "")) == str(row_data[0]) and str(row.get("닉네임", "")) == str(row_data[1]):
+                    self.mock_data["Daily_Log"][idx] = replacement
+                    break
+            else:
+                self.mock_data["Daily_Log"].append(replacement)
             print(f"[MOCK] Upserted to Daily_Log: {row_data}")
             return True
             
@@ -205,6 +220,11 @@ class GoogleSheetsClient:
         """특정 셀 업데이트 (잔여 휴무 수량 차감 등에 사용)"""
         self.clear_cache(sheet_name)
         if self.is_mock:
+            records = self.mock_data.get(sheet_name, [])
+            if 0 <= row - 2 < len(records):
+                headers = list(records[row - 2].keys())
+                if 0 < col <= len(headers):
+                    records[row - 2][headers[col - 1]] = val
             print(f"[MOCK] Update {sheet_name} R{row}C{col} -> {val}")
             return True
 
@@ -382,6 +402,19 @@ class GoogleSheetsClient:
                     end_col_letter = chr(ord('A') + len(log_headers) - 1)
                     ws_log.update(f"A1:{end_col_letter}1", [log_headers])
                     print(f"✔️ 'Daily_Log' 시트 컬럼 추가 완료: {', '.join(missing_log_headers)}")
+
+            # 사진 제출 이력은 Daily_Log와 분리하며 모든 시도를 append-only로 기록합니다.
+            try:
+                ws_history = self.spreadsheet.worksheet("Photo_Auth_History")
+            except gspread.exceptions.WorksheetNotFound:
+                ws_history = self.spreadsheet.add_worksheet(title="Photo_Auth_History", rows="300", cols="11")
+            history_headers = ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간", "사진누적", "벌금액", "이미지ID", "제출시각", "처리사유"]
+            current_history_headers = ws_history.row_values(1)
+            if not current_history_headers:
+                ws_history.update("A1:K1", [history_headers])
+                print("✔️ 'Photo_Auth_History' 헤더 삽입 완료")
+            elif current_history_headers != history_headers:
+                print("⚠️ Photo_Auth_History 헤더가 합의된 순서와 다릅니다. 자동 변경하지 않습니다.")
 
             # 3. Admin_Config 세팅
             try:

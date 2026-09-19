@@ -9,6 +9,7 @@ import json
 import re
 import traceback
 import uuid
+import threading
 
 from integrations.google_sheets import sheets_client, SheetReadError
 from integrations.google_drive import drive_client
@@ -104,6 +105,8 @@ router = APIRouter(prefix="/webhook", tags=["Webhook"])
 # 봇이 사용자 요청 맥락을 기억하기 위한 상태 저장소 (메모리 방식)
 # 형태: { "UserKey": {"type": "반휴" | "특휴", "expires": datetime_object} }
 user_states = {}
+photo_auth_locks = {}
+photo_auth_locks_guard = threading.Lock()
 RESERVED_NICK_INPUTS = {"인증", "반휴 인증", "주휴 사용", "월휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"}
 BUTTON_FALLBACK_HINT = "\n\n(버튼이 안 보이면 채팅창에 '인증' 또는 '반휴 인증'을 직접 입력해 주세요.)"
 
@@ -124,6 +127,11 @@ def build_kakao_response(text: str) -> Dict[str, Any]:
             ]
         }
     }
+
+
+def build_kakao_callback_wait_response() -> Dict[str, Any]:
+    """콜백 대기 응답에는 일반 template을 섞지 않습니다."""
+    return {"version": "2.0", "useCallback": True}
 
 async def download_image(url: str) -> str:
     """URL에서 이미지를 임시 파일로 다운로드 후 경로 반환"""
@@ -196,6 +204,14 @@ def is_duplicate_nickname(userkey: str, nickname: str) -> bool:
     return False
 
 
+def is_optional_participation_day(events: list, target_date: str) -> bool:
+    return any(
+        str(event.get("날짜", "")).strip() == target_date
+        and "자율참여" in str(event.get("이벤트 타입", ""))
+        for event in events
+    )
+
+
 def activate_member_if_needed(row_idx: int, member_record: dict, source: str = "unknown") -> None:
     """
     신규 가입자를 '대기'로 두고, 첫 인증/휴무 사용 시점에 '활동'으로 전환합니다.
@@ -238,17 +254,51 @@ def update_sheets_in_background(request_id: str, row_idx: int, col_updates: list
         print(f"[{request_id}] ❌ [백그라운드] 구글 시트 업데이트 중 에러 발생: {e}")
         print(traceback.format_exc())
 
+def _photo_auth_lock(nickname: str, target_date: str):
+    key = (nickname, target_date)
+    with photo_auth_locks_guard:
+        return photo_auth_locks.setdefault(key, threading.Lock())
+
+
+def _history_row(target_date, nickname, auth_type, status, daily, total, penalty, image_url, submitted_at, reason):
+    return [
+        target_date, nickname, auth_type, status, "-",
+        format_min_to_str(daily) if daily is not None else "-",
+        format_min_to_str(total) if total is not None else "-",
+        str(penalty), image_url, submitted_at.strftime("%Y-%m-%d %H:%M:%S"), reason,
+    ]
+
+
+def _send_kakao_callback(callback_url: str, message: str, request_id: str) -> bool:
+    if not callback_url:
+        return True
+    try:
+        response = httpx.post(callback_url, json=build_kakao_response(message), timeout=10.0)
+        response.raise_for_status()
+        body = response.json()
+        if body.get("status") != "SUCCESS":
+            print(f"[{request_id}] ❌ 카카오 콜백 실패: status={body.get('status', 'unknown')}")
+            return False
+        print(f"[{request_id}] ✅ 카카오 콜백 전송 완료")
+        return True
+    except Exception as exc:
+        print(f"[{request_id}] ❌ 카카오 콜백 전송 오류: {type(exc).__name__}")
+        return False
+
+
 def process_photo_auth_in_background(
     request_id: str, image_url: str, auth_type: str, nickname: str,
     member_record: dict, row_idx: int, target_date: str,
-    target_override, pending_deduct_amt: float, now: datetime
+    target_override, pending_deduct_amt: float, now: datetime, callback_url: str = ""
 ):
     """
     [카카오 5초 타임아웃 완전 회피]
     사진 다운로드 → OCR → 벌금 계산 → 구글 시트 기록을 모두 백그라운드에서 처리합니다.
     카카오에게는 즉시 '접수 완료' 응답을 보낸 뒤, 이 함수가 뒤에서 천천히 돌아갑니다.
     """
-    import asyncio
+    final_message = "인증 처리에 실패했습니다. 잠시 후 다시 시도해 주세요."
+    local_path = None
+    history_written = False
     try:
         from integrations.google_sheets import sheets_client as bg_sheets
         from services.ocr_service import ocr_service as bg_ocr
@@ -257,18 +307,13 @@ def process_photo_auth_in_background(
 
         print(f"[{request_id}] 🔄 [백그라운드-사진인증] 처리 시작: {nickname} ({auth_type})")
 
-        # 첫 인증 시도를 시작한 시점에 대기 -> 활동 전환
-        current_status = str(member_record.get("상태", "")).strip()
-        if current_status == "대기":
-            status_ok = bg_sheets.update_cell("Member_Master", row_idx, 3, "활동")
-            if status_ok:
-                member_record["상태"] = "활동"
-                print(f"[{request_id}] ✅ [백그라운드-사진인증] 상태 전환: {current_status} -> 활동")
-            else:
-                print(f"[{request_id}] ❌ [백그라운드-사진인증] 상태 전환 실패 (row={row_idx})")
+        # 기존 규칙: 대기 회원은 첫 사진 인증 시도 시 활동 상태로 전환합니다.
+        if str(member_record.get("상태", "")).strip() == "대기":
+            with _photo_auth_lock(nickname, target_date):
+                if bg_sheets.update_cell("Member_Master", row_idx, 3, "활동"):
+                    member_record["상태"] = "활동"
 
         # 1. 이미지 다운로드 (동기 방식으로 변환)
-        import httpx
         resp = httpx.get(image_url, timeout=15)
         resp.raise_for_status()
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
@@ -276,126 +321,163 @@ def process_photo_auth_in_background(
         temp_file.close()
         local_path = temp_file.name
         drive_url = image_url
-        previous_log_row = get_existing_daily_log_row(target_date, nickname, bg_sheets)
-        refund_updates, _, refunded_record = build_refund_member_updates(
-            target_date, nickname, member_record, bg_sheets
-        )
 
         # 2. OCR 파싱
-        ocr_result = bg_ocr.extract_time_from_image(local_path)
-        os.remove(local_path)
-        end_time, duration, total_mnts, full_text = ocr_result[0], ocr_result[1], ocr_result[2], ocr_result[3]
+        ocr_result = bg_ocr.extract_time_from_image(local_path, nickname)
+        if not ocr_result.succeeded:
+            reason = ocr_result.error or "출석표를 판독하지 못했습니다."
+            history_ok = bg_sheets.append_row("Photo_Auth_History", _history_row(
+                target_date, nickname, auth_type, "판독실패", None, None, 0, drive_url, now, reason
+            ))
+            history_written = history_ok
+            final_message = f"인증 거절: {reason}\n기존 최종 인증이 있다면 그대로 유지됩니다."
+            if not history_ok:
+                final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 인증은 확정되지 않았습니다."
+            return final_message
 
-        if not end_time or duration == 0:
-            print(f"[{request_id}] ❌ [백그라운드-사진인증] OCR 실패 (시간 정보 미발견)")
-            # OCR 실패해도 시트에 기록은 남김
-            log_row = build_daily_log_row(
-                target_date=target_date,
-                nickname=nickname,
-                auth_type=auth_type,
-                status_msg="OCR실패",
-                approval="-",
-                daily_time="-",
-                total_time="-",
-                penalty=0,
-                image_id=drive_url,
-                weekly_deduct=0.0,
-                monthly_deduct=0.0,
-            )
-            if not commit_daily_log_and_member_updates(
-                bg_sheets, row_idx, member_record, log_row, refund_updates, previous_log_row
-            ):
-                print(f"[{request_id}] ❌ [백그라운드-사진인증] OCR 실패 로그/환불 반영 실패")
-            return
+        end_time = ocr_result.attendance_at
+        duration = ocr_result.daily_minutes
+        total_mnts = ocr_result.total_minutes
 
         # 3. 목표시간 계산
-        bt_str = str(refunded_record.get("목표시간", "120")).strip()
+        bt_str = str(member_record.get("목표시간", "120")).strip()
         base_target = parse_duration_to_min(bt_str)
         if base_target == 0:
             base_target = 120
         final_target = target_override * 60 if target_override else base_target
 
-        # 4. 시간 위조 및 지각 검증
-        is_fake_date, is_absent, is_ontime = bg_checkin.validate_ocr_time(
+        # 4. 날짜 형식/과거 날짜/허용 시각을 서로 구분합니다.
+        time_validation = bg_checkin.validate_ocr_attendance(
             target_date, end_time, duration, final_target
         )
+        with _photo_auth_lock(nickname, target_date):
+            bg_sheets.clear_cache("Member_Master")
+            bg_sheets.clear_cache("Daily_Log")
+            latest_member = bg_sheets.get_member_by_userkey(str(member_record.get("UserKey", "")))
+            if not latest_member:
+                raise RuntimeError("회원 최신 정보를 찾지 못했습니다.")
+            row_idx = latest_member.get("_row_index", row_idx)
+            existing = bg_sheets.get_today_auth_history(target_date, nickname)
 
-        # 누적 시간 조작 검사는 비활성화 (사용자 요청)
-        is_fake_time = False
+            # 날짜/사진 형식 실패는 기존 최종 결과를 건드리지 않습니다.
+            if not time_validation.valid:
+                penalty = -5000 if time_validation.is_past_date and not existing else 0
+                status_msg = "과거사진" if time_validation.is_past_date else "검증거절"
+                reason = time_validation.reason
+                if existing:
+                    reason += " 기존 최종 인증은 유지했습니다."
+                elif time_validation.is_past_date:
+                    old_deposit = int(str(latest_member.get("예치금", "0")).replace(",", "") or 0)
+                    deposit_ok = bg_sheets.update_cell("Member_Master", row_idx, 8, str(old_deposit + penalty))
+                    log_ok = bg_sheets.upsert_daily_log([
+                        target_date, nickname, auth_type, status_msg, "-", format_min_to_str(duration),
+                        format_min_to_str(total_mnts), str(penalty), drive_url,
+                    ])
+                    if not deposit_ok or not log_ok:
+                        final_message = "처리 실패: 시트 저장에 실패하여 인증을 확정하지 못했습니다."
+                        return final_message
+                history_ok = bg_sheets.append_row("Photo_Auth_History", _history_row(
+                    target_date, nickname, auth_type, status_msg, duration, total_mnts,
+                    penalty, drive_url, now, reason,
+                ))
+                history_written = history_ok
+                if not history_ok:
+                    final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 정상 저장으로 확정하지 않습니다."
+                elif time_validation.is_past_date:
+                    final_message = f"과거 날짜 사진: 사진 {end_time[:10]} / 인증 대상일 {target_date} / {penalty:,}원"
+                    if existing:
+                        final_message += "\n기존 최종 인증은 유지되었습니다."
+                else:
+                    final_message = f"인증 거절: {reason}"
+                return final_message
 
-        # 닉네임 로깅
-        clean_nick = nickname.replace(" ", "")
-        if clean_nick not in full_text.replace(" ", ""):
-            print(f"⚠️ [주의] 닉네임 불일치 감지: DB={clean_nick}, OCR텍스트에 없음")
+            previous_total = parse_duration_to_min(latest_member.get("최종누적", "0"))
+            if total_mnts <= previous_total:
+                relation = "같습니다" if total_mnts == previous_total else "감소했습니다"
+                reason = f"사진 누적시간이 기존 최종누적보다 {relation}. 기존 최종 인증을 유지했습니다."
+                history_ok = bg_sheets.append_row("Photo_Auth_History", _history_row(
+                    target_date, nickname, auth_type, "누적거절", duration, total_mnts, 0,
+                    drive_url, now, reason,
+                ))
+                history_written = history_ok
+                final_message = f"인증 거절: {reason}"
+                if not history_ok:
+                    final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 인증은 확정되지 않았습니다."
+                return final_message
 
-        # 5. 벌금 계산
-        penalty = bg_engine.calculate_penalty(
-            target_minutes=final_target,
-            auth_minutes=duration,
-            is_late_submit=not is_ontime,
-            is_fake_time=is_fake_time,
-            is_fake_date=is_fake_date,
-            is_absent=is_absent
-        )
+            # 판독과 검증이 모두 끝난 뒤에만 기존 정상 결과의 환불/전환을 수행합니다.
+            previous_log_row = get_existing_daily_log_row(target_date, nickname, bg_sheets)
+            refund_updates, refund_msg, refunded_record = build_refund_member_updates(
+                target_date, nickname, latest_member, bg_sheets
+            )
+            is_absent = time_validation.is_absent_due_to_late
+            penalty = bg_engine.calculate_penalty(
+                final_target, duration, not time_validation.is_ontime, False, False, is_absent
+            )
+            is_failed = is_absent or duration < final_target
+            status_msg = "결석(목표미달)" if is_failed else "PASS"
+            col_updates = list(refund_updates)
+            col_updates.append((5, "최종누적", format_min_to_str(total_mnts)))
+            applied_weekly_deduct = 0.0
+            if auth_type == "반휴" and not is_failed:
+                applied_weekly_deduct = pending_deduct_amt
+                new_leave = max(0.0, float(refunded_record.get("주간휴무", "0")) - applied_weekly_deduct)
+                col_updates.append((6, "주간휴무", str(new_leave)))
+            if penalty < 0:
+                old_deposit = int(str(refunded_record.get("예치금", "0")).replace(",", "") or 0)
+                new_deposit = old_deposit + penalty
+                col_updates.append((8, "예치금", str(new_deposit)))
+                if new_deposit <= 0:
+                    col_updates.extend([(3, "상태", "예치금 소진"), (13, "탈퇴일", now.strftime("%Y-%m-%d"))])
 
-        is_failed = is_absent or (duration < final_target)
-        if is_failed:
-            status_msg = "결석(목표미달)"
-        elif is_fake_date:
-            status_msg = "허위(예전사진)"
-        else:
-            status_msg = "PASS" if penalty == 0 else "경고/지각발송"
+            log_row = build_daily_log_row(
+                target_date, nickname, auth_type, status_msg, "-", format_min_to_str(duration),
+                format_min_to_str(total_mnts), penalty, drive_url, applied_weekly_deduct, 0.0,
+            )
+            log_ok = commit_daily_log_and_member_updates(
+                bg_sheets, row_idx, latest_member, log_row, col_updates, previous_log_row
+            )
+            reason = "현재 최종 기록으로 적용했습니다." if log_ok else "최종 기록 저장에 실패했습니다."
+            history_ok = bg_sheets.append_row("Photo_Auth_History", _history_row(
+                target_date, nickname, auth_type, status_msg, duration, total_mnts,
+                penalty, drive_url, now, reason,
+            ))
+            history_written = history_ok
+            if not log_ok or not history_ok:
+                final_message = "처리 실패: 시트 저장을 모두 완료하지 못해 인증 확정을 안내할 수 없습니다."
+                return final_message
 
-        # 6. 시트 업데이트 수집
-        col_updates = list(refund_updates)
-        applied_weekly_deduct = 0.0
-
-        if auth_type == "반휴" and not is_failed and not is_fake_date:
-            applied_weekly_deduct = pending_deduct_amt
-            new_val = max(0.0, float(refunded_record.get("주간휴무", "0")) - applied_weekly_deduct)
-            col_updates.append((6, "주간휴무", str(new_val)))
-
-        if penalty < 0:
-            old_deposit_str = str(refunded_record.get("예치금", "0")).replace(",", "")
-            old_deposit = int(old_deposit_str) if old_deposit_str.replace("-", "").isdigit() else 0
-            new_deposit = old_deposit + penalty
-            col_updates.append((8, "예치금", str(new_deposit)))
-            if new_deposit <= 0:
-                col_updates.append((3, "상태", "예치금 소진"))
-                col_updates.append((13, "탈퇴일", now.strftime("%Y-%m-%d")))
-
-        dur_str = f"{duration//60}시간 {duration%60}분"
-        tot_str = f"{total_mnts//60}시간 {total_mnts%60}분"
-        log_row = build_daily_log_row(
-            target_date=target_date,
-            nickname=nickname,
-            auth_type=auth_type,
-            status_msg=status_msg,
-            approval="-",
-            daily_time=dur_str,
-            total_time=tot_str,
-            penalty=penalty,
-            image_id=drive_url,
-            weekly_deduct=applied_weekly_deduct,
-            monthly_deduct=0.0,
-        )
-
-        if not is_fake_date and total_mnts > 0:
-            col_updates.append((5, "누적시간", format_min_to_str(total_mnts)))
-
-        # 7. 구글 시트 반영
-        if not commit_daily_log_and_member_updates(
-            bg_sheets, row_idx, member_record, log_row, col_updates, previous_log_row
-        ):
-            print(f"[{request_id}] ❌ [백그라운드-사진인증] 로그/회원정보 반영 실패")
-            return
-
-        print(f"[{request_id}] ✅ [백그라운드-사진인증] 완료: {nickname} → {status_msg}, 벌금={penalty}")
-        print(f"  - 금일공부: {dur_str}, 누적: {tot_str}, 목표: {final_target}분")
+            if is_failed:
+                final_message = (
+                    f"시간 부족: 당일 {format_min_to_str(duration)} / 목표 {format_min_to_str(final_target)} / 벌금 {penalty:,}원"
+                )
+            else:
+                final_message = (
+                    f"인증 완료: 당일 {format_min_to_str(duration)} / 목표 {format_min_to_str(final_target)} / 적용 날짜 {target_date}"
+                )
+            if refund_msg:
+                final_message += refund_msg
+            print(f"[{request_id}] ✅ [백그라운드-사진인증] 완료: {nickname} → {status_msg}")
+            return final_message
 
     except Exception as e:
         print(f"[{request_id}] ❌ [백그라운드-사진인증] 에러 발생: {e}")
         print(traceback.format_exc())
+        if not history_written:
+            try:
+                history_written = sheets_client.append_row("Photo_Auth_History", _history_row(
+                    target_date, nickname, auth_type, "처리실패", None, None, 0,
+                    image_url, now, "사진 다운로드 또는 인증 처리 중 오류가 발생했습니다.",
+                ))
+                if not history_written:
+                    final_message = "처리 실패: 제출 이력도 저장하지 못했습니다. 인증은 확정되지 않았습니다."
+            except Exception:
+                final_message = "처리 실패: 제출 이력도 저장하지 못했습니다. 인증은 확정되지 않았습니다."
+        return final_message
+    finally:
+        if local_path and os.path.exists(local_path):
+            os.remove(local_path)
+        _send_kakao_callback(callback_url, final_message, request_id)
 
 def get_existing_daily_log_row(target_date: str, nickname: str, sheet_client=sheets_client) -> list:
     """기존 Daily_Log 행을 upsert_daily_log에 다시 넣을 수 있는 형태로 반환합니다."""
@@ -548,6 +630,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     """카카오톡 채널 챗봇(오픈빌더)으로부터 들어오는 요청을 처리합니다."""
     body = await request.json()
     user_request = body.get("userRequest", {})
+    callback_url = str(user_request.get("callbackUrl", "")).strip()
     utterance = user_request.get("utterance", "").strip()
     action = body.get("action", {})
     params = action.get("detailParams", {})
@@ -788,12 +871,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
 
     # 💡 [휴무일(자율참여) 우선 차단]
     admin_events = sheets_client.get_sheet_records("Admin_Config")
-    is_optional_day = False
-    for event in admin_events:
-        if str(event.get("날짜", "")).strip() == target_date:
-            if "자율참여" in str(event.get("이벤트 타입", "")):
-                is_optional_day = True
-                break
+    is_optional_day = is_optional_participation_day(admin_events, target_date)
                 
     if is_optional_day and not is_status:
         return build_kakao_response("🏖️ 오늘은 [자율참여(휴무일)] 지정일입니다!\n\n거짓 인증, 휴가(반휴/주휴) 차감 등 일체의 스터디 인증이 필요하지 않습니다. 마음 편히 쉬시거나 자율적으로 공부해주세요! 🎉")
@@ -928,8 +1006,11 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 process_photo_auth_in_background,
                 request_id, image_url, auth_type, nickname,
                 dict(member_record), row_idx, target_date,
-                target_override, pending_deduct_amt, now
+                target_override, pending_deduct_amt, now, callback_url
             )
+
+            if callback_url:
+                return build_kakao_callback_wait_response()
             
             import urllib.parse
             encoded_nick = urllib.parse.quote(nickname)

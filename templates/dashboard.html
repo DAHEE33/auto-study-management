@@ -356,6 +356,10 @@
         .lb-info { flex: 1; padding-left: 15px; }
         .lb-name { font-weight: 600; margin-bottom: 3px; }
         .lb-time { font-size: 0.8rem; color: var(--accent-light); font-family: var(--font-num); }
+        .history-card { margin-top: 24px; background: var(--glass-bg); border: 1px solid var(--glass-border); border-radius: 24px; padding: 20px; overflow-x: auto; }
+        .history-card table { width: 100%; min-width: 760px; text-align: left; }
+        .history-card td { color: var(--text-secondary); font-size: 0.88rem; vertical-align: top; }
+        .history-card a { color: var(--accent-light); }
         
     </style>
 </head>
@@ -437,8 +441,10 @@
                             {% elif cell.type == "반휴" %}
                                 <div class="badge leave" style="background:rgba(245,158,11,0.4);" data-tooltip="{{ cell.tooltip }}">🌗</div>
                             
-                            {% else %}
+                            {% elif cell.status == "PASS" %}
                                 <div class="badge pass" data-tooltip="{{ cell.tooltip }}">✓</div>
+                            {% else %}
+                                <div class="badge fail" data-tooltip="{{ cell.tooltip }}">거절</div>
                             {% endif %}
                         </td>
                         
@@ -468,6 +474,29 @@
         </div>
 
     </div>
+
+    {% if my_stats.is_valid %}
+    <div class="history-card">
+        <h2 class="section-title">📷 내 사진 인증 제출 이력</h2>
+        <p style="color:var(--text-secondary);">실패·거절 이력은 출석으로 인정되지 않으며, 현재 최종 기록은 위 출석표의 Daily_Log 결과입니다.</p>
+        <table>
+            <thead><tr><th>제출시각 / 대상일</th><th>사진</th><th>판독 시간</th><th>판정 / 처리사유</th><th>최종 기록 관계</th></tr></thead>
+            <tbody>
+            {% for item in photo_history %}
+                <tr>
+                    <td>{{ item.get('제출시각', '-') }}<br>{{ item.get('날짜', '-') }}</td>
+                    <td>{% if item.get('이미지ID') and item.get('이미지ID') != '-' %}<a href="{{ item.get('이미지ID') }}" target="_blank" rel="noopener noreferrer">제출 사진 열기</a><br><small>기존 링크 만료 시 열리지 않을 수 있습니다.</small>{% else %}-{% endif %}</td>
+                    <td>당일 {{ item.get('당일시간', '-') }}<br>누적 {{ item.get('사진누적', '-') }}</td>
+                    <td>{{ item.get('판정', '-') }}<br>{{ item.get('처리사유', '-') }}</td>
+                    <td>{{ item.get('관계', '-') }}</td>
+                </tr>
+            {% else %}
+                <tr><td colspan="5">사진 인증 제출 이력이 없습니다.</td></tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
 
 </div>
 

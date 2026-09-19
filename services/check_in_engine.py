@@ -1,5 +1,15 @@
 from datetime import datetime, timedelta
+from dataclasses import dataclass
 from typing import Dict, Tuple
+
+
+@dataclass(frozen=True)
+class OCRTimeValidation:
+    valid: bool
+    is_past_date: bool = False
+    is_absent_due_to_late: bool = False
+    is_ontime: bool = False
+    reason: str = ""
 
 class CheckInEngine:
     def __init__(self):
@@ -59,7 +69,7 @@ class CheckInEngine:
 
         return hour >= 17 or hour < 2
 
-    def validate_ocr_time(self, target_date_str: str, end_time_str: str, auth_minutes: int, target_minutes: int) -> Tuple[bool, bool, bool]:
+    def validate_ocr_attendance(self, target_date_str: str, end_time_str: str, auth_minutes: int, target_minutes: int) -> OCRTimeValidation:
         """
         OCR로 추출된 종료 시간이 허가된 시간(당일 17:00 ~ 익일 02:00) 안에 안전하게 속하는지 검증합니다.
         Returns: (is_fake_date, is_absent_due_to_late, is_ontime)
@@ -67,48 +77,40 @@ class CheckInEngine:
         - is_absent_due_to_late: 01:00 ~ 02:00 사이에 끝났으나 '목표 시간'을 달성하지 못한 얄짤없는 결석 케이스
         - is_ontime: 01:00 이전에 정상 종료한 케이스
         """
-        # 정규표현식으로 시간을 파싱합니다.
-        # 포맷이 "2026-04-15 20:49:02" 혹은 "20:49" 일 수 있습니다.
-        if " " in end_time_str:
-            # "YYYY-MM-DD HH:MM:SS" 형태
-            try:
-                ocr_dt = datetime.strptime(end_time_str.split(".")[0], "%Y-%m-%d %H:%M:%S")
-            except ValueError:
-                return True, False, False # 파싱 실패는 Fake로
-        else:
-            # "HH:MM" 만 있을 경우 날짜를 target_date로 추정하여 붙여서 검사
-            # 만약 시간이 00~04시 사이라면 target_date + 1일로 조립
-            try:
-                h, m = map(int, end_time_str.split(":"))
-                base_date = datetime.strptime(target_date_str, "%Y-%m-%d")
-                if 0 <= h <= 4:
-                    ocr_dt = base_date + timedelta(days=1)
-                else:
-                    ocr_dt = base_date
-                ocr_dt = ocr_dt.replace(hour=h, minute=m, second=0)
-            except ValueError:
-                return True, False, False
+        try:
+            ocr_dt = datetime.strptime(end_time_str, "%Y-%m-%d %H:%M:%S")
+            target_base = datetime.strptime(target_date_str, "%Y-%m-%d")
+        except (TypeError, ValueError):
+            return OCRTimeValidation(False, reason="출석 날짜·시각을 정확히 읽지 못했습니다.")
 
-        target_base = datetime.strptime(target_date_str, "%Y-%m-%d")
         valid_start = target_base.replace(hour=17, minute=0, second=0)
         valid_end_exception = (target_base + timedelta(days=1)).replace(hour=2, minute=0, second=0)
         valid_end_normal = (target_base + timedelta(days=1)).replace(hour=1, minute=0, second=0)
 
-        # 1. 아예 시간 범위 (17:00 ~ 익일 02:00) 바깥인 경우 -> 허위 사진
-        if ocr_dt < valid_start or ocr_dt > valid_end_exception:
-            return True, False, False
+        if ocr_dt.date() < target_base.date():
+            return OCRTimeValidation(
+                False, is_past_date=True,
+                reason=f"과거 날짜 사진입니다. (사진 {ocr_dt:%Y-%m-%d} / 대상 {target_date_str})",
+            )
+        if ocr_dt > valid_end_exception or ocr_dt < valid_start:
+            return OCRTimeValidation(False, reason="출석 시각이 인증 허용 범위 밖입니다.")
 
         # 2. 예외 인정 시간 (01:00 ~ 02:00) 검증 로직
         if ocr_dt > valid_end_normal:
             if auth_minutes < target_minutes:
                 # 익일 1시를 넘겼는데 목표를 못 채웠으므로 엄격한 결석 처리
-                return False, True, False
+                return OCRTimeValidation(True, is_absent_due_to_late=True)
             else:
                 # 1시를 넘겼지만 2시 전이고 목표를 모두 달성했으므로 PASS (기존 ontime 취급)
-                return False, False, True
+                return OCRTimeValidation(True, is_ontime=True)
 
         # 3. 그 외 (17:00 ~ 01:00 이내 종료) -> 완벽한 정상 인증
-        return False, False, True
+        return OCRTimeValidation(True, is_ontime=True)
+
+    def validate_ocr_time(self, target_date_str: str, end_time_str: str, auth_minutes: int, target_minutes: int) -> Tuple[bool, bool, bool]:
+        """기존 호출부 호환용. 새 코드는 상세 결과를 반환하는 validate_ocr_attendance를 사용합니다."""
+        result = self.validate_ocr_attendance(target_date_str, end_time_str, auth_minutes, target_minutes)
+        return result.is_past_date, result.is_absent_due_to_late, result.is_ontime
 
     def is_within_deadline(self, current_dt: datetime = None) -> bool:
         # 하위호환 유지용 (이제 validate_ocr_time이 완전히 대체함)
