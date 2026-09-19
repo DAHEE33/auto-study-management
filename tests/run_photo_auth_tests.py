@@ -75,6 +75,7 @@ def with_patch(fn, *args):
 
 
 cases = [
+    ("주말 접수 차단/금요일 마감", tests.test_weekday_submission_windows_and_friday_deadlines),
     ("최신 실패/전체 이력/차감 보존", lambda: with_patch(tests.test_latest_failure_keeps_money_and_leave_for_later_refund)),
     ("실패 반휴의 허위 환불 방지", lambda: with_patch(tests.test_new_half_leave_failure_does_not_create_refund)),
     ("주말 정산/평일 집계", lambda: with_patch(tests.test_weekly_report_weekend_only_and_same_week_range)),

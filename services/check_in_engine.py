@@ -34,6 +34,10 @@ class CheckInEngine:
             
         return target.strftime("%Y-%m-%d")
 
+    def is_study_date(self, target_date: str) -> bool:
+        """금요일분 익일 제출을 허용하기 위해 접수일 대신 인증 대상일을 검사합니다."""
+        return datetime.strptime(target_date, "%Y-%m-%d").weekday() < 5
+
     def is_blackout_time(self, current_dt: datetime = None) -> bool:
         """
         접수 마감된 절대 휴식 시간 (12:00 ~ 16:59) 인지 확인합니다.
@@ -62,6 +66,9 @@ class CheckInEngine:
 
         if action_type == "status":
             return True
+
+        if not self.is_study_date(self.get_target_date(current_dt)):
+            return False
 
         hour = current_dt.hour
         if action_type in ("week_off", "month_off", "special_off"):

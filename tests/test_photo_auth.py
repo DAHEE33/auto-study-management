@@ -317,7 +317,7 @@ def test_weekly_report_weekend_only_and_same_week_range(monkeypatch):
     for day in (19, 20):
         monkeypatch.setattr(Clock, "now", classmethod(lambda cls, day=day: cls(2026, 9, day, 12)))
         job.run_weekly_settlement_job()
-        assert calls[-1]["start_date"] == "2026-09-12"
+        assert calls[-1]["start_date"] == "2026-09-14"
         assert calls[-1]["end_date"] == "2026-09-18"
 
 
@@ -355,3 +355,27 @@ def test_new_half_leave_failure_does_not_create_refund(monkeypatch):
     sheets.member["주간휴무"] = "0.0"
     updates, _, preview = webhook.build_refund_member_updates("2026-09-09", "산들바람", sheets.member, sheets)
     assert updates == [] and preview["주간휴무"] == "0.0"
+
+
+def test_weekday_submission_windows_and_friday_deadlines():
+    engine = CheckInEngine()
+    cases = [
+        ("2026-09-18 17:00", True, True),
+        ("2026-09-19 00:00", True, True),
+        ("2026-09-19 01:59", True, True),
+        ("2026-09-19 02:00", False, True),
+        ("2026-09-19 11:59", False, True),
+        ("2026-09-19 12:00", False, False),
+        ("2026-09-19 17:00", False, False),
+        ("2026-09-20 01:00", False, False),
+        ("2026-09-20 17:00", False, False),
+        ("2026-09-21 01:00", False, False),
+        ("2026-09-21 16:59", False, False),
+        ("2026-09-21 17:00", True, True),
+    ]
+    for raw, auth, leave in cases:
+        now = datetime.strptime(raw, "%Y-%m-%d %H:%M")
+        assert engine.is_action_allowed("general_auth", now) == auth, raw
+        for action in ("week_off", "month_off", "special_off"):
+            assert engine.is_action_allowed(action, now) == leave, (raw, action)
+        assert engine.is_action_allowed("status", now)

@@ -899,6 +899,9 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
         # 일반 인증/반휴 인증 처리
         action_type = "general_auth"
 
+    if not is_status and not check_in_engine.is_study_date(target_date):
+        return build_kakao_response("오늘은 인증하는 날이 아닙니다.\n스터디는 월~금에 진행하며, 주말 대상 인증과 휴무 신청은 받지 않습니다.")
+
     if not check_in_engine.is_action_allowed(action_type, now):
         if action_type in ("week_off", "month_off", "special_off"):
             return build_kakao_response("❌ 처리 가능 시간이 지났습니다.\n(주휴/월휴/특휴 마감: 익일 12:00, 오픈: 당일 17:00)")

@@ -38,19 +38,19 @@ def _collect_weekly_notices(admin_rows: list, notice_date: str) -> list[str]:
 def run_weekly_settlement_job():
     """
     [매주 토요일 12:00 정오 실행용]
-    최근 7일(지난주 토 오전 5시 ~ 오늘 금 밤)간의 Daily_Log를 집계하여
+    이번 주 월요일~금요일의 Daily_Log를 집계하여
     벌금의 총합과 성실 멤버 1/n 보상을 계산한 문자열 템플릿을 생성하고,
     관리자가 구글 시트에서 복사하기 쉽게 Admin_Config에 저장합니다.
     """
     print("🚀 [Batch] Starting Weekly Settlement Job...")
     
-    # 1. 정산 대상 날짜 산정 (보통 토요일에 실행하므로 이번주 토요일을 기준으로 최근 7일)
+    # 1. 토요일·일요일 실행 모두 이번 주 월요일~금요일을 대상으로 합니다.
     now = datetime.now()
     if now.weekday() < 5:
         print("주간 정산·분배 안내는 주말에만 생성합니다.")
         return
     end_date_obj = now - timedelta(days=now.weekday() - 4)  # 이번 주 금요일
-    start_date_obj = end_date_obj - timedelta(days=6)  # 표시 기간은 지난 토요일~이번 금요일
+    start_date_obj = end_date_obj - timedelta(days=4)  # 이번 주 월요일
     
     start_date = start_date_obj.strftime("%Y-%m-%d")
     end_date = end_date_obj.strftime("%Y-%m-%d")
