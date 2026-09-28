@@ -1,5 +1,8 @@
 from datetime import datetime
 from types import SimpleNamespace
+import asyncio
+import copy
+import json
 
 import pytest
 
@@ -102,8 +105,12 @@ class FakeSheets:
     def get_sheet_records(self, sheet):
         if sheet == "Daily_Log" and self.daily:
             headers = ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간",
-                       "사진누적", "벌금액", "이미지ID", "차감주휴", "차감월휴"]
+                       "사진누적", "벌금액", "이미지ID", "차감주휴", "차감월휴", "당일인증정보"]
             return [dict(zip(headers, self.daily))]
+        if sheet == "Photo_Auth_History":
+            headers = ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간",
+                       "사진누적", "벌금액", "이미지ID", "제출시각", "처리사유"]
+            return [dict(zip(headers, row)) for row in self.history]
         return []
     def clear_cache(self, *_): pass
     def get_member_by_userkey(self, _): return dict(self.member)
@@ -130,7 +137,7 @@ class FakeSheets:
         return self.history_ok
 
 
-def _run_background(monkeypatch, sheets, ocr_result, callback_url=""):
+def _run_background(monkeypatch, sheets, ocr_result, callback_url="", auth_type="일반"):
     import integrations.google_sheets as sheets_module
     import routers.webhook as webhook
     import services.ocr_service as ocr_module
@@ -145,8 +152,9 @@ def _run_background(monkeypatch, sheets, ocr_result, callback_url=""):
         raise_for_status=lambda: None, json=lambda: {"status": "SUCCESS"}
     ))
     message = webhook.process_photo_auth_in_background(
-        "req", "https://image", "일반", "산들바람", dict(sheets.member), 2,
-        "2026-09-09", None, 0, datetime(2026, 9, 9, 20, 0), callback_url,
+        "req", "https://image", auth_type, "산들바람", dict(sheets.member), 2,
+        "2026-09-09", 1 if auth_type == "반휴" else None,
+        0.5 if auth_type == "반휴" else 0, datetime(2026, 9, 9, 20, 0), callback_url,
         "https://study.hee-factory.com/dashboard?user=%EC%82%B0%EB%93%A4%EB%B0%94%EB%9E%8C",
     )
     return message, callbacks
@@ -165,7 +173,7 @@ def test_increasing_total_is_applied_and_large_jump_is_allowed(monkeypatch):
 
 @pytest.mark.parametrize("total", [6000, 5999])
 def test_equal_or_decreased_total_rejected_without_overwrite(monkeypatch, total):
-    old = ["2026-09-09", "산들바람", "일반", "PASS", "-", "2시간 0분", "100시간 0분", "0", "old"]
+    old = ["2026-09-08", "산들바람", "일반", "PASS", "-", "2시간 0분", "100시간 0분", "0", "old"]
     sheets = FakeSheets(total="100시간 0분", daily=old)
     message, _ = _run_background(monkeypatch, sheets, OCRResult(
         "2026-09-09 20:00:00", 121, total, ""
@@ -174,6 +182,204 @@ def test_equal_or_decreased_total_rejected_without_overwrite(monkeypatch, total)
     assert sheets.daily[3] == "누적거절"
     assert sheets.member["최종누적"] == "100시간 0분"
     assert sheets.history[0][3] == "누적거절"
+
+
+@pytest.mark.parametrize("duration", [60, 120])
+def test_same_day_auth_type_switch_with_equal_total(monkeypatch, duration):
+    sheets = FakeSheets()
+    photo = OCRResult("2026-09-09 20:00:00", duration, 6120, "")
+    _run_background(monkeypatch, sheets, photo)
+    original_deposit = sheets.member["예치금"]
+    for auth_type in ["반휴", "반휴", "일반"]:
+        message, _ = _run_background(monkeypatch, sheets, photo, auth_type=auth_type)
+        assert not message.startswith("인증 거절")
+        assert sheets.daily[2] == auth_type
+        assert sheets.daily[3] == ("결석(목표미달)" if auth_type == "일반" and duration < 120 else "PASS")
+        assert float(sheets.member["주간휴무"]) == (0.5 if auth_type == "반휴" else 1.0)
+        assert sheets.member["예치금"] == ("10000" if auth_type == "반휴" else original_deposit)
+        assert sheets.member["최종누적"] == "102시간 0분"
+
+
+def _webhook_request(monkeypatch, sheets, utterance, photo=None, pending_tasks=None):
+    import integrations.google_sheets as sheets_module
+    import routers.webhook as webhook
+    import services.ocr_service as ocr_module
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls): return cls(2026, 9, 9, 20, 0)
+
+    class Request:
+        base_url = "https://study.test/"
+        async def json(self):
+            return {"userRequest": {"user": {"id": "U1"}, "utterance": utterance},
+                    "action": {"detailParams": {"image": {"origin": "https://image"}} if photo else {}}}
+
+    class Tasks:
+        def __init__(self): self.tasks = []
+        def add_task(self, fn, *args): self.tasks.append((fn, args))
+
+    monkeypatch.setattr(webhook, "sheets_client", sheets)
+    monkeypatch.setattr(sheets_module, "sheets_client", sheets)
+    monkeypatch.setattr(webhook, "datetime", Clock)
+    monkeypatch.setattr(webhook, "user_states", {})
+    monkeypatch.setattr(webhook.leave_reset_service, "run_if_needed", lambda: None)
+    monkeypatch.setattr(webhook.httpx, "get", lambda *_a, **_k: SimpleNamespace(content=b"image", raise_for_status=lambda: None))
+    monkeypatch.setattr(ocr_module, "ocr_service", SimpleNamespace(extract_time_from_image=lambda *_: photo))
+    tasks = Tasks()
+    response = asyncio.run(webhook.kakao_webhook(Request(), tasks))
+    if pending_tasks is not None:
+        pending_tasks.extend(tasks.tasks)
+    else:
+        for fn, args in tasks.tasks:
+            fn(*args)
+    return response["template"]["outputs"][0]["simpleText"]["text"]
+
+
+def test_all_same_day_transitions_through_webhook(monkeypatch):
+    choices = {"일반": "인증", "반휴": "반휴 인증", "주휴": "주휴 사용", "월휴": "월휴 사용"}
+    for duration in (3, 60, 120):
+        for source in choices:
+            for destination in choices:
+                sheets = FakeSheets()
+                photo = OCRResult("2026-09-09 20:00:00", duration, 6000 + duration, "")
+                # 사진을 먼저 보관한 뒤 모든 유형 쌍 및 중복 요청을 실제 라우터로 처리합니다.
+                _webhook_request(monkeypatch, sheets, "인증", photo)
+                for kind in (source, destination, destination):
+                    _webhook_request(monkeypatch, sheets, choices[kind])
+                    target = 60 if kind == "반휴" else 120
+                    failed = kind in {"일반", "반휴"} and duration < target
+                    penalty = (-1000 if duration < 60 else -500) if failed else 0
+                    assert sheets.daily[2:4] == [kind, "결석(목표미달)" if failed else "PASS"], (source, destination, duration)
+                    assert int(sheets.member["예치금"]) == 10000 + penalty
+                    assert float(sheets.member["주간휴무"]) == (0 if kind == "주휴" else 0.5 if kind == "반휴" and not failed else 1)
+                    assert float(sheets.member["남은월휴"]) == (0 if kind == "월휴" else 1)
+                    assert webhook_minutes(sheets.daily[5]) == (0 if kind in {"주휴", "월휴"} else duration)
+                    assert webhook_minutes(sheets.member["최종누적"]) == (6000 if kind in {"주휴", "월휴"} else 6000 + duration)
+                    assert json.loads(sheets.daily[11])["baseline_total"] == 6000
+                assert sheets.history[0][5] == f"{duration // 60}시간 {duration % 60}분"
+
+
+def webhook_minutes(value):
+    from routers.webhook import parse_duration_to_min
+    return parse_duration_to_min(value)
+
+
+def test_late_penalty_to_leave_and_back(monkeypatch):
+    sheets = FakeSheets()
+    photo = OCRResult("2026-09-10 01:30:00", 3, 6003, "")
+    _webhook_request(monkeypatch, sheets, "인증", photo)
+    assert sheets.member["예치금"] == "8000"
+    _webhook_request(monkeypatch, sheets, "주휴 사용")
+    assert sheets.member["예치금"] == "10000"
+    assert float(sheets.member["주간휴무"]) == 0
+    _webhook_request(monkeypatch, sheets, "인증")
+    assert sheets.member["예치금"] == "8000"
+    assert float(sheets.member["주간휴무"]) == 1
+
+
+def test_leave_save_failure_restores_photo_and_balances(monkeypatch):
+    sheets = FakeSheets()
+    _webhook_request(monkeypatch, sheets, "인증", OCRResult("2026-09-09 20:00:00", 60, 6060, ""))
+    before = copy.deepcopy((sheets.member, sheets.daily, sheets.history))
+    original = sheets.update_cell
+    failed = []
+    def fail_once(sheet, row, col, value):
+        if col == 6 and not failed:
+            failed.append(True)
+            return False
+        return original(sheet, row, col, value)
+    monkeypatch.setattr(sheets, "update_cell", fail_once)
+    message = _webhook_request(monkeypatch, sheets, "주휴 사용")
+    assert "오류" in message
+    assert (sheets.member, sheets.daily, sheets.history) == before
+
+
+def test_legacy_history_after_leave_allows_resubmission(monkeypatch):
+    sheets = FakeSheets(total="102시간 0분", daily=["2026-09-09", "산들바람", "월휴", "PASS", "-", "0", "-", "0", "-", "0", "1"])
+    sheets.member["남은월휴"] = "0"
+    sheets.history = [["2026-09-09", "산들바람", "일반", "PASS", "-", "2시간 0분", "102시간 0분", "0", "https://image", "2026-09-09 20:00:00", "현재 최종 기록으로 적용했습니다."]]
+    _webhook_request(monkeypatch, sheets, "반휴 인증", OCRResult("2026-09-09 20:00:00", 120, 6120, ""))
+    assert sheets.daily[2:4] == ["반휴", "PASS"]
+    assert float(sheets.member["남은월휴"]) == 1
+    assert float(sheets.member["주간휴무"]) == 0.5
+
+
+def test_pending_photo_cannot_overwrite_newer_leave(monkeypatch):
+    sheets = FakeSheets()
+    pending = []
+    photo = OCRResult("2026-09-09 20:00:00", 120, 6120, "")
+    _webhook_request(monkeypatch, sheets, "인증", photo, pending)
+    _webhook_request(monkeypatch, sheets, "월휴 사용")
+    import services.ocr_service as ocr_module
+    monkeypatch.setattr(ocr_module, "ocr_service", SimpleNamespace(extract_time_from_image=lambda *_: photo))
+    before = copy.deepcopy((sheets.member, sheets.daily))
+    fn, args = pending[0]
+    assert "이후 변경" in fn(*args)
+    assert (sheets.member, sheets.daily) == before
+    assert sheets.history[-1][3] == "처리취소"
+
+
+def test_depleted_deposit_can_be_restored_by_same_day_leave(monkeypatch):
+    sheets = FakeSheets()
+    sheets.member["예치금"] = "500"
+    _webhook_request(monkeypatch, sheets, "인증", OCRResult("2026-09-09 20:00:00", 3, 6003, ""))
+    assert sheets.member["상태"] == "예치금 소진"
+    _webhook_request(monkeypatch, sheets, "월휴 사용")
+    assert sheets.member["상태"] == "활동"
+    assert sheets.member["예치금"] == "500"
+    assert sheets.member["예치금소진일자"] == "-"
+    assert float(sheets.member["남은월휴"]) == 0
+
+
+def test_failed_photo_then_leave_then_reuse_keeps_history(monkeypatch):
+    sheets = FakeSheets()
+    _webhook_request(monkeypatch, sheets, "반휴 인증", OCRResult("2026-09-09 20:00:00", 60, 6060, ""))
+    _webhook_request(monkeypatch, sheets, "인증", OCRResult(None, None, None, "", "판독 오류"))
+    assert sheets.daily[3] == "판독실패"
+    _webhook_request(monkeypatch, sheets, "월휴 사용")
+    assert float(sheets.member["주간휴무"]) == 1
+    assert float(sheets.member["남은월휴"]) == 0
+    _webhook_request(monkeypatch, sheets, "반휴 인증")
+    assert sheets.daily[2:4] == ["반휴", "PASS"]
+    assert float(sheets.member["주간휴무"]) == 0.5
+    assert float(sheets.member["남은월휴"]) == 1
+    assert [row[3] for row in sheets.history] == ["PASS", "판독실패", "PASS"]
+
+
+def test_first_leave_requires_photo_and_unavailable_leave_keeps_state(monkeypatch):
+    sheets = FakeSheets()
+    _webhook_request(monkeypatch, sheets, "주휴 사용")
+    before = copy.deepcopy((sheets.member, sheets.daily))
+    assert "사진을 보내주세요" in _webhook_request(monkeypatch, sheets, "반휴 인증")
+    assert (sheets.member, sheets.daily) == before
+    _webhook_request(monkeypatch, sheets, "반휴 인증", OCRResult("2026-09-09 20:00:00", 60, 6060, ""))
+    assert float(sheets.member["주간휴무"]) == 0.5
+    sheets.member["남은월휴"] = "0"
+    before = copy.deepcopy((sheets.member, sheets.daily))
+    assert "월휴가 없습니다" in _webhook_request(monkeypatch, sheets, "월휴 사용")
+    assert (sheets.member, sheets.daily) == before
+
+
+def test_special_leave_pending_restores_previous_deductions(monkeypatch):
+    sheets = FakeSheets()
+    _webhook_request(monkeypatch, sheets, "반휴 인증", OCRResult("2026-09-09 20:00:00", 60, 6060, ""))
+    _webhook_request(monkeypatch, sheets, "특휴 증빙하기", OCRResult(None, None, None, ""))
+    assert sheets.daily[2:5] == ["특휴", "대기", "N"]
+    assert float(sheets.member["주간휴무"]) == 1
+    _webhook_request(monkeypatch, sheets, "반휴 인증")
+    assert sheets.daily[2:4] == ["반휴", "PASS"]
+    assert float(sheets.member["주간휴무"]) == 0.5
+
+
+def test_missing_new_sheet_header_fails_without_writing():
+    from integrations.google_sheets import GoogleSheetsClient, DAILY_LOG_HEADERS
+    client = GoogleSheetsClient.__new__(GoogleSheetsClient)
+    client.is_mock = False
+    client._cache = {}
+    client._cache_time = {}
+    client.spreadsheet = SimpleNamespace(worksheet=lambda _: SimpleNamespace(row_values=lambda _: DAILY_LOG_HEADERS[:-1]))
+    assert not client.upsert_daily_log([""] * len(DAILY_LOG_HEADERS))
 
 
 def test_failed_resubmission_preserves_final_record_and_writes_history(monkeypatch):
@@ -288,7 +494,7 @@ def test_normal_leave_refund_rule_is_preserved(monkeypatch):
     assert any(col == 8 for _, col, _ in sheets.update_calls)
 
 
-def test_latest_total_recheck_prevents_older_completion_overwrite(monkeypatch):
+def test_same_day_new_photo_uses_previous_day_baseline(monkeypatch):
     sheets = FakeSheets(total="100시간 0분")
     first, _ = _run_background(monkeypatch, sheets, OCRResult(
         "2026-09-09 20:00:00", 130, 8000, ""
@@ -297,8 +503,13 @@ def test_latest_total_recheck_prevents_older_completion_overwrite(monkeypatch):
         "2026-09-09 19:00:00", 121, 7000, ""
     ))
     assert first.startswith("인증 완료")
-    assert second.startswith("인증 거절")
-    assert sheets.member["최종누적"] == "133시간 20분"
+    assert second.startswith("인증 완료")
+    assert sheets.member["최종누적"] == "116시간 40분"
+    third, _ = _run_background(monkeypatch, sheets, OCRResult(
+        "2026-09-09 20:00:00", 121, 6000, ""
+    ))
+    assert third.startswith("인증 거절")
+    assert sheets.member["최종누적"] == "116시간 40분"
 
 
 def test_weekly_report_weekend_only_and_same_week_range(monkeypatch):

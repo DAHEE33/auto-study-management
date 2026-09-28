@@ -8,7 +8,7 @@ import time
 DAILY_LOG_HEADERS = [
     "날짜", "닉네임", "유형", "판정", "승인여부(특휴시)",
     "당일시간", "사진누적", "벌금액", "이미지ID",
-    "차감주휴", "차감월휴"
+    "차감주휴", "차감월휴", "당일인증정보"
 ]
 
 
@@ -172,7 +172,7 @@ class GoogleSheetsClient:
         """
         self.clear_cache("Daily_Log")
         if self.is_mock:
-            headers = ["날짜", "닉네임", "유형", "판정", "승인여부(특휴시)", "당일시간", "사진누적", "벌금액", "이미지ID"]
+            headers = DAILY_LOG_HEADERS
             replacement = dict(zip(headers, row_data))
             for idx, row in enumerate(self.mock_data["Daily_Log"]):
                 if str(row.get("날짜", "")) == str(row_data[0]) and str(row.get("닉네임", "")) == str(row_data[1]):
@@ -189,6 +189,9 @@ class GoogleSheetsClient:
             
             worksheet = self.spreadsheet.worksheet("Daily_Log")
             header = worksheet.row_values(1)
+            if len(row_data) >= len(DAILY_LOG_HEADERS) and header[:len(DAILY_LOG_HEADERS)] != DAILY_LOG_HEADERS:
+                print("Daily_Log 헤더가 일치하지 않아 당일 인증정보 저장을 중단합니다. 초기화를 확인해 주세요.")
+                return False
             expected_len = len(header) if header else len(DAILY_LOG_HEADERS)
             normalized_row = list(row_data[:expected_len])
             if len(normalized_row) < expected_len:
@@ -394,7 +397,7 @@ class GoogleSheetsClient:
                 print("✔️ 'Daily_Log' 시트에 기초 데이터 삽입 완료")
             else:
                 log_headers = ws_log.row_values(1)
-                required_log_headers = ["차감주휴", "차감월휴"]
+                required_log_headers = ["차감주휴", "차감월휴", "당일인증정보"]
                 missing_log_headers = [h for h in required_log_headers if h not in log_headers]
                 if missing_log_headers:
                     ws_log.add_cols(len(missing_log_headers))
