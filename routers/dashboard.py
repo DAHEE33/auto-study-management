@@ -78,6 +78,11 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
         monday = today - timedelta(days=weekday)
         date_objs = [monday + timedelta(days=i) for i in range(5)]
 
+    summary_date_strs = [d.strftime("%Y-%m-%d") for d in date_objs]
+    if view == "monthly":
+        display_start = first_day - timedelta(days=first_day.weekday())
+        date_objs = [display_start + timedelta(days=i) for i in range((today - display_start).days + 1)]
+
     date_strs = [d.strftime("%Y-%m-%d") for d in date_objs]
     display_dates = [d.strftime("%m/%d(%a)") for d in date_objs]
     
@@ -90,7 +95,7 @@ async def view_dashboard(request: Request, user: str = Query(None), view: str = 
         dur = parse_duration_to_min(str(log.get("당일시간", "")))
         
         # view 범위에 맞는 로그만 합산
-        if (d_str in date_strs and n_str in acc_map
+        if (d_str in summary_date_strs and n_str in acc_map
                 and str(log.get("판정", "")) not in {"판독실패", "OCR실패", "검증거절", "누적거절", "처리실패", "과거사진"}):
             acc_map[n_str] += dur
             
