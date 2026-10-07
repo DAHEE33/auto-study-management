@@ -108,10 +108,25 @@ user_states = {}
 photo_auth_locks = {}
 photo_auth_locks_guard = threading.Lock()
 RESERVED_NICK_INPUTS = {"인증", "반휴 인증", "주휴 사용", "월휴 사용", "특휴 증빙하기", "내 현황", "목표 변경"}
-BUTTON_FALLBACK_HINT = "\n\n(버튼이 안 보이면 채팅창에 '인증' 또는 '반휴 인증'을 직접 입력해 주세요.)"
+BUTTON_FALLBACK_HINT = "\n\n(버튼이 안 보이면 '인증', '반휴 인증', '주휴 사용', '월휴 사용', '특휴 증빙하기', '내 현황', '목표 변경'을 직접 입력해 주세요.)"
 
 def build_kakao_response(text: str) -> Dict[str, Any]:
     """카카오 i 챗봇 스펙에 맞춘 심플한 텍스트 응답 제네레이터"""
+    if text.startswith(("✅", "인증 완료")):
+        marker = "✅"
+    elif text.startswith((
+        "❌", "⚠️", "⛔", "인증 거절", "인증 실패", "처리 실패", "인증 처리에 실패",
+        "시간 부족", "과거 날짜 사진", "잔여 주간 휴무가 부족", "남은 월휴가 없습니다",
+        "시트 저장 중 오류", "이미지 업로드 중 에러", "이후 변경된 당일 기록",
+    )):
+        marker = "❌"
+    else:
+        marker = "⏳"
+    for prefix in ("✅", "❌", "⚠️", "⛔", "⏳", "✨", "🎯", "🏖️", "🏥", "🌗", "🔥", "📸"):
+        if text.startswith(prefix):
+            text = text[len(prefix):].lstrip()
+            break
+    text = f"{marker} {text}"
     return {
         "version": "2.0",
         "template": {
@@ -355,11 +370,11 @@ def process_photo_auth_in_background(
             history_written = history_ok
             with _photo_auth_lock(nickname, target_date):
                 if expected_log is not None and get_existing_daily_log_row(target_date, nickname, bg_sheets) != expected_log:
-                    final_message = "이후 변경된 당일 기록이 있어 이전 사진 요청은 적용하지 않았습니다."
+                    final_message = "인증 거절\n거절 사유: 이후 변경된 당일 기록이 있어 이전 사진 요청은 적용하지 않았습니다."
                     return final_message
                 log_ok = save_latest_photo_failure(bg_sheets, target_date, nickname, auth_type,
                                                    "판독실패", None, None, drive_url)
-            final_message = f"인증 거절: {reason}\n최신 제출 결과에 판독 실패로 기록했습니다."
+            final_message = f"인증 거절\n거절 사유: {reason}\n최신 제출 결과에 판독 실패로 기록했습니다."
             if not history_ok or not log_ok:
                 final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 인증은 확정되지 않았습니다."
             return final_message
@@ -387,7 +402,7 @@ def process_photo_auth_in_background(
                 raise RuntimeError("회원 최신 정보를 찾지 못했습니다.")
             row_idx = latest_member.get("_row_index", row_idx)
             if expected_log is not None and get_existing_daily_log_row(target_date, nickname, bg_sheets) != expected_log:
-                final_message = "이후 변경된 당일 기록이 있어 이전 사진 요청은 적용하지 않았습니다."
+                final_message = "인증 거절\n거절 사유: 이후 변경된 당일 기록이 있어 이전 사진 요청은 적용하지 않았습니다."
                 history_written = bg_sheets.append_row("Photo_Auth_History", _history_row(
                     target_date, nickname, auth_type, "처리취소", duration, total_mnts, 0,
                     drive_url, now, final_message,
@@ -422,11 +437,14 @@ def process_photo_auth_in_background(
                 if not history_ok or not log_ok:
                     final_message = "처리 실패: 제출 결과를 모두 저장하지 못했습니다."
                 elif time_validation.is_past_date:
-                    final_message = f"과거 날짜 사진: 사진 {end_time[:10]} / 인증 대상일 {target_date} / {penalty:,}원"
+                    final_message = (
+                        f"인증 거절\n거절 사유: {reason}\n"
+                        f"사진 날짜: {end_time[:10]}\n벌금: {abs(penalty):,}원"
+                    )
                     if existing:
                         final_message += "\n최신 제출 결과로 기록했으며 기존 차감 내역은 유지됩니다."
                 else:
-                    final_message = f"인증 거절: {reason}"
+                    final_message = f"인증 거절\n거절 사유: {reason}"
                 return final_message
 
             previous_log_row = get_existing_daily_log_row(target_date, nickname, bg_sheets)
@@ -442,7 +460,7 @@ def process_photo_auth_in_background(
                 history_written = history_ok
                 log_ok = save_latest_photo_failure(bg_sheets, target_date, nickname, auth_type,
                                                    "누적거절", duration, total_mnts, drive_url)
-                final_message = f"인증 거절: {reason}"
+                final_message = f"인증 거절\n거절 사유: {reason}"
                 if not history_ok or not log_ok:
                     final_message = "처리 실패: 제출 이력을 저장하지 못했습니다. 인증은 확정되지 않았습니다."
                 return final_message
@@ -454,7 +472,7 @@ def process_photo_auth_in_background(
             if auth_type == "반휴":
                 approved, message, pending_deduct_amt = bg_checkin.process_leave_request(refunded_record, "반휴")
                 if not approved:
-                    final_message = message
+                    final_message = f"인증 거절\n거절 사유: {message}"
                     return final_message
             is_absent = time_validation.is_absent_due_to_late
             penalty = bg_engine.calculate_penalty(
@@ -497,13 +515,23 @@ def process_photo_auth_in_background(
                 return final_message
 
             if is_failed:
+                failure_reason = "익일 01시 이후에도 목표 공부시간을 달성하지 못했습니다." if is_absent else "목표 공부시간을 달성하지 못했습니다."
                 final_message = (
-                    f"시간 부족: 당일 {format_min_to_str(duration)} / 목표 {format_min_to_str(final_target)} / 벌금 {penalty:,}원"
+                    f"인증 실패 · 결석\n실패 사유: {failure_reason}\n"
+                    f"벌금: {abs(penalty):,}원"
                 )
             else:
-                final_message = (
-                    f"인증 완료: 당일 {format_min_to_str(duration)} / 목표 {format_min_to_str(final_target)} / 적용 날짜 {target_date}"
-                )
+                final_message = "인증 완료 · PASS"
+            remaining_weekly = max(0.0, safe_float(refunded_record.get("주간휴무", "0")) - applied_weekly_deduct)
+            remaining_monthly = safe_float(refunded_record.get("남은월휴", "0"))
+            final_message += (
+                f"\n인증 유형: {auth_type}\n"
+                f"적용 날짜: {target_date}\n"
+                f"당일 공부: {format_min_to_str(duration)}\n"
+                f"목표 시간: {format_min_to_str(final_target)}\n"
+                f"잔여 주휴: {remaining_weekly:g}회\n"
+                f"잔여 월휴: {remaining_monthly:g}회"
+            )
             if refund_msg:
                 final_message += refund_msg
             print(f"[{request_id}] ✅ [백그라운드-사진인증] 완료: {nickname} → {status_msg}")
@@ -530,6 +558,8 @@ def process_photo_auth_in_background(
         if local_path and os.path.exists(local_path):
             os.remove(local_path)
         callback_message = final_message
+        if "적용 날짜:" not in callback_message:
+            callback_message += f"\n인증 유형: {auth_type}\n적용 날짜: {target_date}"
         if dashboard_url:
             callback_message += f"\n\n🔗 {dashboard_url}"
         callback_message += BUTTON_FALLBACK_HINT
@@ -725,6 +755,31 @@ def preview_member_record_after_refund(target_date: str, nickname: str, member_r
 async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     """카카오톡 채널 챗봇(오픈빌더)으로부터 들어오는 요청을 처리합니다."""
     body = await request.json()
+    callback_url = str(body.get("userRequest", {}).get("callbackUrl") or "").strip()
+    if callback_url:
+        background_tasks.add_task(process_kakao_request_in_background, request, background_tasks, body)
+        return build_kakao_callback_wait_response()
+    return await handle_kakao_request(request, background_tasks, body)
+
+
+def process_kakao_request_in_background(request, background_tasks, body):
+    import asyncio
+
+    callback_url = str(body.get("userRequest", {}).get("callbackUrl") or "").strip()
+    request_id = uuid.uuid4().hex[:8]
+    try:
+        response = asyncio.run(handle_kakao_request(request, background_tasks, body))
+        # 사진 인증은 기존 백그라운드 작업이 최종 결과를 콜백으로 보냅니다.
+        if response.get("useCallback"):
+            return
+        message = response["template"]["outputs"][0]["simpleText"]["text"]
+    except Exception:
+        traceback.print_exc()
+        message = "❌ 요청 처리 중 오류가 발생했습니다. 내 현황에서 반영 여부를 확인해 주세요." + BUTTON_FALLBACK_HINT
+    _send_kakao_callback(callback_url, message, request_id)
+
+
+async def handle_kakao_request(request: Request, background_tasks: BackgroundTasks, body):
     user_request = body.get("userRequest", {})
     callback_url = str(user_request.get("callbackUrl") or "").strip()
     utterance = user_request.get("utterance", "").strip()
@@ -1040,11 +1095,26 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                     sheets_client, row_idx, member_record, log_row, member_updates, previous_log_row
                 ):
                     activate_member_if_needed(row_idx, member_record, source=f"{leave_type}_request")
-                    msg += refund_msg
+                    remaining_weekly = new_val if leave_type == "주휴" else safe_float(refunded_record.get("주간휴무", "0"))
+                    remaining_monthly = new_val if leave_type == "월휴" else safe_float(refunded_record.get("남은월휴", "0"))
+                    msg = (
+                        f"✅ {leave_type} 사용 완료 · PASS\n"
+                        f"적용 날짜: {target_date}\n"
+                        f"잔여 주휴: {remaining_weekly:g}회\n"
+                        f"잔여 월휴: {remaining_monthly:g}회"
+                        + refund_msg + BUTTON_FALLBACK_HINT
+                    )
                 else:
                     msg = "시트 저장 중 오류가 발생했습니다. 기존 기록과 잔여 휴무는 변경하지 않았습니다. 잠시 후 다시 시도해 주세요."
             
             reply_text = msg
+            if not is_approved:
+                reply_text = (
+                    f"❌ {leave_type} 사용 거절\n거절 사유: {msg}\n"
+                    f"적용 날짜: {target_date}\n"
+                    f"잔여 주휴: {safe_float(member_record.get('주간휴무', '0')):g}회\n"
+                    f"잔여 월휴: {safe_float(member_record.get('남은월휴', '0')):g}회"
+                )
 
     elif is_special_off:
         # [특휴 요청] - 관리자 승인 대기
@@ -1115,7 +1185,7 @@ async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
                 validation_record = preview_member_record_after_refund(target_date, nickname, member_record)
                 is_approved, msg, deduct_amt = check_in_engine.process_leave_request(validation_record, "반휴")
                 if not is_approved:
-                    return build_kakao_response(msg)
+                    return build_kakao_response(f"❌ 반휴 인증 거절\n거절 사유: {msg}\n적용 날짜: {target_date}")
                 
                 target_override = 1 # 반휴는 목표 1시간으로 고정
                 pending_deduct_amt = deduct_amt # 검증 통과 시 차감하기 위해 보류

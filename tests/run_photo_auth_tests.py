@@ -127,6 +127,11 @@ for index, args in enumerate(invalid_rows, 1):
     cases.append((f"형식/닉네임/중복 거절 {index}", lambda args=args: tests.test_popup_missing_date_nickname_mismatch_and_duplicate_are_rejected(*args)))
 
 failed = []
+cases.append(("휴무 콜백 PASS/잔여량/버튼/거절", lambda: with_patch(tests.test_leave_callback_reports_pass_and_buttons)))
+cases.append(("휴무 전환 환불 후 주휴/월휴 잔여량", lambda: with_patch(tests.test_leave_response_balances_include_refunds)))
+cases.append(("응답 성공/거절/대기 표시 통일", tests.test_response_status_markers))
+cases.append(("월휴 후 일반/반휴 인증 응답과 거절 시 미환불", lambda: with_patch(tests.test_photo_response_after_monthly_leave)))
+cases.append(("사진 인증 목표미달/마감초과 사유 표시", lambda: with_patch(tests.test_photo_failure_response_explains_shortage_and_lateness)))
 for name, case in cases:
     try:
         case()
