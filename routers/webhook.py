@@ -755,8 +755,14 @@ def preview_member_record_after_refund(target_date: str, nickname: str, member_r
 async def kakao_webhook(request: Request, background_tasks: BackgroundTasks):
     """카카오톡 채널 챗봇(오픈빌더)으로부터 들어오는 요청을 처리합니다."""
     body = await request.json()
-    callback_url = str(body.get("userRequest", {}).get("callbackUrl") or "").strip()
-    if callback_url:
+    user_request = body.get("userRequest", {})
+    callback_url = str(user_request.get("callbackUrl") or "").strip()
+    utterance = user_request.get("utterance", "").strip()
+    block_name = (user_request.get("block") or {}).get("name", "")
+    is_leave_request = any(leave in utterance or leave in block_name for leave in ("주휴", "월휴"))
+    # 사진 요청 안내는 바로 반환하고, 시트 차감이 필요한 휴무만 콜백으로 처리합니다.
+    # 사진이 들어온 경우의 콜백 처리는 handle_kakao_request에서 유지합니다.
+    if callback_url and is_leave_request:
         background_tasks.add_task(process_kakao_request_in_background, request, background_tasks, body)
         return build_kakao_callback_wait_response()
     return await handle_kakao_request(request, background_tasks, body)

@@ -132,6 +132,8 @@ cases.append(("휴무 전환 환불 후 주휴/월휴 잔여량", lambda: with_p
 cases.append(("응답 성공/거절/대기 표시 통일", tests.test_response_status_markers))
 cases.append(("월휴 후 일반/반휴 인증 응답과 거절 시 미환불", lambda: with_patch(tests.test_photo_response_after_monthly_leave)))
 cases.append(("사진 인증 목표미달/마감초과 사유 표시", lambda: with_patch(tests.test_photo_failure_response_explains_shortage_and_lateness)))
+cases.append(("인증/반휴 사진 안내와 마감 거절은 대기 없이 직접 응답", lambda: with_patch(tests.test_auth_prompt_and_deadline_are_direct_with_callback)))
+cases.append(("사진 제출 콜백 유지", lambda: with_patch(tests.test_photo_submission_still_uses_callback)))
 for name, case in cases:
     try:
         case()

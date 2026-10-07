@@ -200,14 +200,14 @@ def test_same_day_auth_type_switch_with_equal_total(monkeypatch, duration):
         assert sheets.member["최종누적"] == "102시간 0분"
 
 
-def _webhook_request(monkeypatch, sheets, utterance, photo=None, pending_tasks=None, callback_url="", callbacks=None):
+def _webhook_request(monkeypatch, sheets, utterance, photo=None, pending_tasks=None, callback_url="", callbacks=None, current_dt=None):
     import integrations.google_sheets as sheets_module
     import routers.webhook as webhook
     import services.ocr_service as ocr_module
 
     class Clock(datetime):
         @classmethod
-        def now(cls): return cls(2026, 9, 9, 20, 0)
+        def now(cls): return current_dt or cls(2026, 9, 9, 20, 0)
 
     class Request:
         base_url = "https://study.test/"
@@ -230,7 +230,8 @@ def _webhook_request(monkeypatch, sheets, utterance, photo=None, pending_tasks=N
     if callbacks is not None:
         monkeypatch.setattr(webhook, "_send_kakao_callback", lambda url, message, _id: callbacks.append((url, webhook.build_kakao_response(message))))
     response = asyncio.run(webhook.kakao_webhook(Request(), tasks))
-    if callback_url:
+    is_deferred = response.get("useCallback", False)
+    if is_deferred:
         assert response == {"version": "2.0", "useCallback": True}
         assert sheets.daily is None
     if pending_tasks is not None:
@@ -238,7 +239,7 @@ def _webhook_request(monkeypatch, sheets, utterance, photo=None, pending_tasks=N
     else:
         for fn, args in tasks.tasks:
             fn(*args)
-    if callback_url:
+    if is_deferred:
         return callbacks[-1][1]["template"]["outputs"][0]["simpleText"]["text"]
     return response["template"]["outputs"][0]["simpleText"]["text"]
 
@@ -267,6 +268,37 @@ def test_leave_callback_reports_pass_and_buttons(monkeypatch):
     assert "월휴가 없습니다" in message
     assert message.startswith("❌ ")
     assert sheets.daily is None
+
+
+def test_auth_prompt_and_deadline_are_direct_with_callback(monkeypatch):
+    for command in ("인증", "반휴", "반휴 인증"):
+        sheets = FakeSheets()
+        callbacks, tasks = [], []
+        message = _webhook_request(monkeypatch, sheets, command, pending_tasks=tasks,
+                                   callback_url="https://callback.test", callbacks=callbacks)
+        assert "출석표 사진을 보내주세요" in message
+        if "반휴" in command:
+            assert "최소 1시간" in message
+        assert callbacks == [] and tasks == []
+        assert sheets.daily is None and not sheets.update_calls
+
+        message = _webhook_request(monkeypatch, sheets, command, pending_tasks=tasks,
+                                   callback_url="https://callback.test", callbacks=callbacks,
+                                   current_dt=datetime(2026, 9, 10, 7, 12))
+        assert message.startswith("❌ 처리 기간이 지났습니다.")
+        assert callbacks == [] and tasks == []
+        assert sheets.daily is None and not sheets.update_calls
+
+
+def test_photo_submission_still_uses_callback(monkeypatch):
+    sheets = FakeSheets()
+    callbacks = []
+    message = _webhook_request(monkeypatch, sheets, "사진",
+                               photo=OCRResult("2026-09-09 20:00:00", 120, 6120, ""),
+                               callback_url="https://callback.test", callbacks=callbacks)
+    assert message.startswith("✅ 인증 완료 · PASS")
+    assert len(callbacks) == 1
+    assert sheets.daily[2:4] == ["일반", "PASS"]
 
 
 def test_leave_response_balances_include_refunds(monkeypatch):
